@@ -7,7 +7,7 @@ from PyQt5.QtGui import QFont, QColor, QPalette
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QListWidget, QListWidgetItem, QLineEdit, QFrame, QScrollArea, QMessageBox,
-    QTextEdit, QSplitter
+    QTextEdit, QSplitter, QCheckBox
 )
 
 # Локальные импорты
@@ -328,7 +328,7 @@ class VoiceChatUI(QWidget):
         self.chat_title.setAlignment(Qt.AlignCenter)
         self.chat_title.mousePressEvent = self.toggle_participants
 
-        # Кнопка настроек (заглушка)
+        # Кнопка настроек
         self.settings_btn = QPushButton("⚙")
         self.settings_btn.setFixedSize(40, 40)
         self.settings_btn.setStyleSheet("""
@@ -342,6 +342,7 @@ class VoiceChatUI(QWidget):
                 border-radius: 20px;
             }
         """)
+        self.settings_btn.clicked.connect(self.show_settings)
 
         # Кнопка микрофона
         self.mic_btn = QPushButton("🎤")
@@ -358,6 +359,50 @@ class VoiceChatUI(QWidget):
         top_layout.addWidget(self.mic_btn)
 
         layout.addWidget(top_bar)
+
+    def setup_settings_menu(self):
+        """Создает меню настроек"""
+        self.settings_menu = QWidget()
+        self.settings_menu.setWindowTitle("Настройки голосового чата")
+        self.settings_menu.setFixedSize(300, 200)
+        self.settings_menu.setWindowFlags(Qt.Dialog)
+        
+        layout = QVBoxLayout(self.settings_menu)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(10)
+        
+        # Настройка DTX
+        dtx_label = QLabel("DTX (Discontinuous Transmission):")
+        dtx_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(dtx_label)
+        
+        dtx_desc = QLabel("Уменьшает трафик при молчании, но может снизить качество голоса")
+        dtx_desc.setStyleSheet("color: #AAAAAA; font-size: 11px;")
+        dtx_desc.setWordWrap(True)
+        layout.addWidget(dtx_desc)
+        
+        self.dtx_checkbox = QCheckBox("Включить DTX")
+        self.dtx_checkbox.setChecked(True)  # Включено по умолчанию
+        self.dtx_checkbox.stateChanged.connect(self.toggle_dtx)
+        layout.addWidget(self.dtx_checkbox)
+        
+        # Кнопка закрытия
+        close_btn = QPushButton("Закрыть")
+        close_btn.clicked.connect(self.settings_menu.hide)
+        layout.addWidget(close_btn)
+        
+        layout.addStretch()
+
+    def toggle_dtx(self, state):
+        """Включение/выключение DTX"""
+        if self.voice_client:
+            self.voice_client.set_dtx(state == Qt.Checked)
+
+    def show_settings(self):
+        """Показывает меню настроек"""
+        if not hasattr(self, 'settings_menu'):
+            self.setup_settings_menu()
+        self.settings_menu.show()
 
     def setup_participants_bar(self, layout):
         """Создает панель участников (горизонтальный список)"""

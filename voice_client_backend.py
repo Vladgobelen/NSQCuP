@@ -8,7 +8,7 @@ import time
 import queue
 import struct
 import ctypes
-from ctypes import c_ubyte, c_int32, c_int16, c_int, byref, POINTER, cdll
+from ctypes import c_ubyte, c_int32, c_int16, c_int, byref, POINTER, c_void_p, cdll
 from collections import deque
 from PyQt5.QtCore import QObject, pyqtSignal
 
@@ -36,6 +36,7 @@ class VoiceClientBackend(QObject):
         self.is_connected = False
         self.running = False
         self.logger = setup_backend_logging()
+        self.use_dtx = True  # DTX включен по умолчанию
 
         # Аудио буферы
         self.playback_buffer = deque(maxlen=SAMPLE_RATE * BUFFER_DURATION_MS // 1000)
@@ -81,28 +82,30 @@ class VoiceClientBackend(QObject):
             self.logger.info(f"Opus библиотека загружена: {lib_path}")
 
             # Определяем прототипы функций
-            self.opus.opus_encoder_create.restype = ctypes.c_void_p
-            self.opus.opus_encoder_create.argtypes = [c_int32, c_int, c_int, ctypes.POINTER(c_int)]
+            self.opus.opus_encoder_create.restype = c_void_p
+            self.opus.opus_encoder_create.argtypes = [c_int32, c_int, c_int, POINTER(c_int)]
 
-            self.opus.opus_decoder_create.restype = ctypes.c_void_p
-            self.opus.opus_decoder_create.argtypes = [c_int32, c_int, ctypes.POINTER(c_int)]
+            self.opus.opus_decoder_create.restype = c_void_p
+            self.opus.opus_decoder_create.argtypes = [c_int32, c_int, POINTER(c_int)]
 
             self.opus.opus_encode.restype = c_int
-            self.opus.opus_encode.argtypes = [ctypes.c_void_p, ctypes.POINTER(c_int16), c_int,
-                                              ctypes.POINTER(c_ubyte), c_int32]
+            self.opus.opus_encode.argtypes = [c_void_p, POINTER(c_int16), c_int, POINTER(c_ubyte), c_int32]
 
             self.opus.opus_decode.restype = c_int
-            self.opus.opus_decode.argtypes = [ctypes.c_void_p, ctypes.POINTER(c_ubyte), c_int32,
-                                              ctypes.POINTER(c_int16), c_int, c_int]
+            self.opus.opus_decode.argtypes = [c_void_p, POINTER(c_ubyte), c_int32, POINTER(c_int16), c_int, c_int]
 
-            # Константы Opus
-            OPUS_APPLICATION_AUDIO = 2049
+            # Добавляем прототип для управления параметрами кодера
+            self.opus.opus_encoder_ctl.restype = c_int
+            self.opus.opus_encoder_ctl.argtypes = [c_void_p, c_int, c_int]
 
             # Создаем кодировщик
             error = c_int(0)
             self.encoder = self.opus.opus_encoder_create(SAMPLE_RATE, CHANNELS, OPUS_APPLICATION_AUDIO, byref(error))
             if error.value != 0:
                 raise Exception(f"Ошибка создания кодировщика: {error.value}")
+
+            # Включаем DTX по умолчанию
+            self.set_dtx(self.use_dtx)
 
             # Создаем декодер
             error = c_int(0)
@@ -116,6 +119,16 @@ class VoiceClientBackend(QObject):
             error_msg = f"Ошибка инициализации Opus: {str(e)}"
             self.logger.error(error_msg)
             self.opus = None
+
+    def set_dtx(self, enabled):
+        """Включение/выключение DTX"""
+        self.use_dtx = enabled
+        if self.encoder:
+            result = self.opus.opus_encoder_ctl(self.encoder, OPUS_SET_DTX_REQUEST, 1 if enabled else 0)
+            if result == 0:
+                self.logger.info(f"DTX {'включен' if enabled else 'выключен'}")
+            else:
+                self.logger.warning(f"Не удалось изменить состояние DTX: {result}")
 
     def connect_to_server(self, server_ip, server_port):
         """Подключение к серверу"""
