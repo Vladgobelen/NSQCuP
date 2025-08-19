@@ -21,18 +21,21 @@ from PyQt5.QtWidgets import (
     QStackedWidget,
     QListWidget,
     QListWidgetItem,
-    QLineEdit
+    QLineEdit,
+    QTextEdit
 )
 from PyQt5.QtCore import Qt, QTimer, QSize
 from PyQt5.QtGui import QIcon, QPalette, QColor, QFont, QFontDatabase
 from addon_manager import AddonManager, ErrorHandler, AddonData
 from voice_client_ui import VoiceChatUI
 
+
 def get_base_path():
     """Получает базовый путь для ресурсов"""
     if getattr(sys, 'frozen', False):
         return sys._MEIPASS
     return os.path.dirname(os.path.abspath(__file__))
+
 
 class AddonUpdater(QMainWindow):
     def __init__(self):
@@ -41,12 +44,12 @@ class AddonUpdater(QMainWindow):
         self.resize(550, 650)
         self.logger = logging.getLogger('AddonUpdater')
         self.logger.setLevel(logging.DEBUG)
-        
+
         # Настройка логирования
         if not hasattr(self, 'logger_configured'):
             if not os.path.exists('logs'):
                 os.makedirs('logs')
-            
+
             fh = logging.FileHandler('logs/main_ui.log')
             fh.setLevel(logging.DEBUG)
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -97,63 +100,138 @@ class AddonUpdater(QMainWindow):
 
     def _setup_addon_ui(self):
         layout = QVBoxLayout(self.addon_widget)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
+        # Верхняя панель (Telegram-style)
+        self._setup_top_bar(layout)
+
+        # Панель состояния игры
         self._setup_game_panel(layout)
 
+        # Разделитель
         sep = QFrame()
-        sep.setObjectName("separator")
         sep.setFrameShape(QFrame.HLine)
         sep.setFrameShadow(QFrame.Sunken)
+        sep.setStyleSheet("background-color: #555555; margin: 0 10px;")
         layout.addWidget(sep)
 
+        # Заголовок аддонов
+        addons_header = QWidget()
+        addons_header_layout = QHBoxLayout(addons_header)
+        addons_header_layout.setContentsMargins(15, 10, 15, 5)
+
+        addons_label = QLabel("Доступные аддоны")
+        addons_label.setFont(QFont("Arial", 12, QFont.Bold))
+        addons_header_layout.addWidget(addons_label)
+        addons_header_layout.addStretch()
+
+        layout.addWidget(addons_header)
+
+        # Список аддонов
         self._setup_addons_list(layout)
+
+    def _setup_top_bar(self, parent_layout):
+        """Создает верхнюю панель в стиле Telegram"""
+        top_bar = QWidget()
+        top_bar.setFixedHeight(50)
+        top_bar.setStyleSheet("background-color: #2d2d2d;")
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(10, 5, 10, 5)
+
+        # Заголовок
+        title = QLabel("Менеджер аддонов")
+        title.setFont(QFont("Arial", 14, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+
+        # Кнопка голосового чата
+        self.voice_btn = QPushButton("🎤")
+        self.voice_btn.setFont(QFont("Arial", 12))
+        self.voice_btn.setFixedSize(40, 40)
+        self.voice_btn.setToolTip("Голосовой чат")
+        self.voice_btn.clicked.connect(self.show_voice_chat)
+        self.voice_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                border: none;
+                border-radius: 20px;
+                color: white;
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
+
+        top_layout.addStretch()
+        top_layout.addWidget(title, 1)
+        top_layout.addStretch()
+        top_layout.addWidget(self.voice_btn)
+
+        parent_layout.addWidget(top_bar)
 
     def _setup_game_panel(self, parent_layout):
         panel = QWidget()
         panel.setObjectName("gamePanel")
-        panel_layout = QHBoxLayout()
-        panel.setLayout(panel_layout)
-        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel.setStyleSheet("""
+            #gamePanel {
+                background-color: #2d2d2d;
+                border-radius: 10px;
+                margin: 10px;
+                padding: 10px;
+            }
+        """)
+        panel_layout = QHBoxLayout(panel)
+        panel_layout.setContentsMargins(10, 5, 10, 5)
         panel_layout.setSpacing(8)
 
         self.game_status = QLabel("Проверка игры...")
-        self.game_status.setFont(QFont("Arial", 10, QFont.Bold))
+        self.game_status.setFont(QFont("Arial", 10))
 
         self.launch_btn = QPushButton("Запустить игру")
-        self.launch_btn.setFixedSize(140, 32)
+        self.launch_btn.setFixedSize(120, 36)
         self.launch_btn.clicked.connect(self._launch_game)
-
-        # Кнопка голосового чата с символом UTF-8
-        self.voice_btn = QPushButton("🎤")
-        self.voice_btn.setFont(QFont("Arial", 12))
-        self.voice_btn.setFixedSize(36, 36)
-        self.voice_btn.setToolTip("Голосовой чат")
-        self.voice_btn.clicked.connect(self.show_voice_chat)
+        self.launch_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2ecc71;
+                border: none;
+                border-radius: 5px;
+                color: white;
+                font-weight: bold;
+                padding: 5px;
+            }
+            QPushButton:hover {
+                background-color: #27ae60;
+            }
+            QPushButton:disabled {
+                background-color: #7f8c8d;
+            }
+        """)
 
         panel_layout.addWidget(self.game_status)
+        panel_layout.addStretch()
         panel_layout.addWidget(self.launch_btn)
-        panel_layout.addWidget(self.voice_btn)
         parent_layout.addWidget(panel)
 
         self._check_game()
 
     def _setup_addons_list(self, parent_layout):
-        label = QLabel("Менеджер аддонов")
-        label.setFont(QFont("Arial", 11, QFont.Bold))
-        parent_layout.addWidget(label)
-
         scroll = QScrollArea()
         scroll.setObjectName("addonsScrollArea")
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+        """)
 
         content = QWidget()
         content.setObjectName("scrollContent")
-        self.addons_layout = QVBoxLayout()
-        content.setLayout(self.addons_layout)
-        self.addons_layout.setSpacing(8)
+        self.addons_layout = QVBoxLayout(content)
+        self.addons_layout.setSpacing(10)
+        self.addons_layout.setContentsMargins(10, 5, 10, 10)
 
         scroll.setWidget(content)
         parent_layout.addWidget(scroll, stretch=1)
@@ -201,28 +279,12 @@ class AddonUpdater(QMainWindow):
                 color: #FFFFFF;
                 background-color: #2D2D2D;
             }
-            #centralWidget {
-                background-color: #2D2D2D;
-            }
-            #separator {
-                background-color: #555555;
-            }
-            #gamePanel {
-                background-color: #3A3A3A;
-                border-radius: 4px;
-                padding: 8px;
-            }
-            #addonsScrollArea {
-                background-color: #2D2D2D;
-                border: 1px solid #555555;
-                border-radius: 4px;
-            }
-            #scrollContent {
-                background-color: #2D2D2D;
-            }
             QCheckBox {
                 color: #FFFFFF;
                 spacing: 6px;
+                background-color: #2d2d2d;
+                padding: 5px;
+                border-radius: 5px;
             }
             QCheckBox::indicator {
                 width: 16px;
@@ -231,10 +293,15 @@ class AddonUpdater(QMainWindow):
             QCheckBox::indicator:unchecked {
                 border: 1px solid #555555;
                 background-color: #333333;
+                border-radius: 3px;
             }
             QCheckBox::indicator:checked {
                 border: 1px solid #555555;
                 background-color: #2A82DA;
+                border-radius: 3px;
+            }
+            QCheckBox:hover {
+                background-color: #3d3d3d;
             }
             QProgressBar {
                 height: 4px;
@@ -245,32 +312,15 @@ class AddonUpdater(QMainWindow):
                 background: #2A82DA;
                 border-radius: 2px;
             }
-            QPushButton {
-                background-color: #3D3D3D;
-                border: 1px solid #444;
-                padding: 5px;
-                min-width: 80px;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #4D4D4D;
-            }
-            QPushButton:pressed {
-                background-color: #2D2D2D;
-            }
-            QPushButton:disabled {
-                background-color: #333333;
-                color: #888888;
-            }
             QLabel {
                 color: #FFFFFF;
             }
             QLabel[accessibleName="updateLabel"] {
                 color: #8BC34A;
                 font-style: italic;
-            }
-            QScrollArea {
-                border: none;
+                background-color: transparent;
+                padding: 2px 5px;
+                border-radius: 3px;
             }
             QScrollBar:vertical {
                 border: none;
@@ -302,13 +352,20 @@ class AddonUpdater(QMainWindow):
 
     def _add_addon_item(self, name: str, addon: AddonData):
         widget = QWidget()
-        layout = QVBoxLayout()
-        widget.setLayout(layout)
-        layout.setContentsMargins(0, 0, 0, 0)
+        widget.setObjectName("addonCard")
+        widget.setStyleSheet("""
+            #addonCard {
+                background-color: #2d2d2d;
+                border-radius: 10px;
+                padding: 5px;
+            }
+        """)
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(5)
 
         top_row = QWidget()
-        top_layout = QHBoxLayout()
-        top_row.setLayout(top_layout)
+        top_layout = QHBoxLayout(top_row)
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(6)
 
@@ -317,7 +374,7 @@ class AddonUpdater(QMainWindow):
         checkbox.stateChanged.connect(
             lambda state, n=name: self.manager.toggle_addon(n, state)
         )
-        checkbox.setStyleSheet("font-weight: bold;")
+        checkbox.setStyleSheet("font-weight: bold; font-size: 12px;")
         top_layout.addWidget(checkbox)
 
         update_label = QLabel()
@@ -325,18 +382,29 @@ class AddonUpdater(QMainWindow):
         if name == "NSQC":
             update_label.setVisible(addon.needs_update)
             if addon.needs_update:
-                update_label.setText("(Доступно обновление)")
+                update_label.setText("Доступно обновление")
         top_layout.addWidget(update_label)
         top_layout.addStretch()
 
         desc = QLabel(addon.description)
-        desc.setStyleSheet("color: #AAAAAA;")
+        desc.setStyleSheet("color: #AAAAAA; font-size: 11px;")
         desc.setWordWrap(True)
 
         progress = QProgressBar()
         progress.setRange(0, 100)
         progress.setTextVisible(False)
         progress.setVisible(False)
+        progress.setStyleSheet("""
+            QProgressBar {
+                height: 3px;
+                border-radius: 1px;
+                background: #252525;
+            }
+            QProgressBar::chunk {
+                background: #2A82DA;
+                border-radius: 1px;
+            }
+        """)
 
         layout.addWidget(top_row)
         layout.addWidget(desc)
@@ -372,7 +440,7 @@ class AddonUpdater(QMainWindow):
                     if name == "NSQC":
                         w.update_label.setVisible(addon.needs_update)
                         w.update_label.setText(
-                            "(Доступно обновление)" if addon.needs_update else ""
+                            "Доступно обновление" if addon.needs_update else ""
                         )
 
                     w.checkbox.update()
@@ -413,7 +481,7 @@ class AddonUpdater(QMainWindow):
         self.logger.info("Переход к менеджеру аддонов")
         self.voice_widget.stop_voice_client()
         self.stacked_widget.setCurrentWidget(self.addon_widget)
-    
+
     def closeEvent(self, event):
         self.logger.info("Закрытие приложения")
         self.voice_widget.stop_voice_client()
