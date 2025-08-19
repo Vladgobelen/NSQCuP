@@ -8,6 +8,9 @@
 !/utils.py
 !/ui.py
 !/addon_manager.py
+!/voice_client_utils.py
+!/voice_client_constants.py
+!/voice_client_backend.py
 
 # Дополнительные исключения для системных файлов Git
 !.git/
