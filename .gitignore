@@ -4,6 +4,10 @@
 # Исключения (не игнорировать)
 !/.gitignore
 !/main.py
+!/voice_client_ui.py
+!/utils.py
+!/ui.py
+!/addon_manager.py
 
 # Дополнительные исключения для системных файлов Git
 !.git/
