@@ -1,4 +1,3 @@
-# voice_client_backend.py
 import os
 import platform
 import traceback
@@ -8,6 +7,7 @@ import time
 import queue
 import struct
 import ctypes
+import math
 from ctypes import c_ubyte, c_int32, c_int16, c_int, byref, POINTER, c_void_p, cdll
 from collections import deque
 from PyQt5.QtCore import QObject, pyqtSignal
@@ -24,6 +24,7 @@ except ImportError:
     pyaudio = None
     pyaudio_available = False
 
+
 class VoiceClientBackend(QObject):
     status_update = pyqtSignal(str)
     log_message = pyqtSignal(str)
@@ -37,6 +38,10 @@ class VoiceClientBackend(QObject):
         self.running = False
         self.logger = setup_backend_logging()
         self.use_dtx = True  # DTX включен по умолчанию
+        self.aggressive_dtx = False  # Агрессивный режим DTX
+        self.voice_threshold = DEFAULT_VOICE_THRESHOLD  # Порог активации голоса
+        self.silence_frames = 0  # Счетчик кадров тишины
+        self.silence_threshold = 5  # Количество тихих кадров перед отключением
 
         # Аудио буферы
         self.playback_buffer = deque(maxlen=SAMPLE_RATE * BUFFER_DURATION_MS // 1000)
@@ -104,6 +109,9 @@ class VoiceClientBackend(QObject):
             if error.value != 0:
                 raise Exception(f"Ошибка создания кодировщика: {error.value}")
 
+            # Включаем VBR (переменный битрейт)
+            self.opus.opus_encoder_ctl(self.encoder, OPUS_SET_VBR_REQUEST, 1)
+
             # Включаем DTX по умолчанию
             self.set_dtx(self.use_dtx)
 
@@ -129,6 +137,41 @@ class VoiceClientBackend(QObject):
                 self.logger.info(f"DTX {'включен' if enabled else 'выключен'}")
             else:
                 self.logger.warning(f"Не удалось изменить состояние DTX: {result}")
+
+    def set_aggressive_dtx(self, enabled):
+        """Включение/выключение агрессивного режима DTX"""
+        self.aggressive_dtx = enabled
+        if enabled:
+            self.voice_threshold = AGGRESSIVE_DTX_THRESHOLD
+            self.logger.info(f"Агрессивный DTX включен, порог: {self.voice_threshold}")
+        else:
+            self.voice_threshold = DEFAULT_VOICE_THRESHOLD
+            self.logger.info(f"Агрессивный DTX выключен, порог: {self.voice_threshold}")
+
+    def set_voice_threshold(self, threshold):
+        """Установка порога активации голоса"""
+        self.voice_threshold = threshold
+        self.logger.info(f"Установлен порог активации голоса: {threshold}")
+
+    def _calculate_rms(self, data):
+        """Вычисление RMS (среднеквадратичное значение) аудиоданных"""
+        # Преобразуем байты в массив int16
+        format = f"{len(data)//2}h"
+        samples = struct.unpack(format, data)
+
+        # Вычисляем сумму квадратов
+        sum_squares = 0.0
+        for sample in samples:
+            sum_squares += sample * sample
+
+        # Вычисляем RMS
+        rms = math.sqrt(sum_squares / len(samples)) if samples else 0
+        return rms
+
+    def _is_silence(self, audio_data):
+        """Определяет, является ли аудио тишиной на основе порога"""
+        rms = self._calculate_rms(audio_data)
+        return rms < self.voice_threshold
 
     def connect_to_server(self, server_ip, server_port):
         """Подключение к серверу"""
@@ -259,6 +302,17 @@ class VoiceClientBackend(QObject):
         """Callback для захвата аудио"""
         try:
             if self.is_transmitting and self.is_connected:
+                # Проверяем, является ли аудио тишиной
+                is_silence = self._is_silence(in_data)
+
+                if is_silence:
+                    self.silence_frames += 1
+                    # Если несколько кадров подряд тишина, не отправляем данные
+                    if self.silence_frames >= self.silence_threshold:
+                        return (None, pyaudio.paContinue)
+                else:
+                    self.silence_frames = 0
+
                 # Кодируем в Opus
                 encoded = (c_ubyte * 400)()
 

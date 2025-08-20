@@ -1,4 +1,3 @@
-# voice_client_ui.py
 import os
 import logging
 import traceback
@@ -7,12 +6,13 @@ from PyQt5.QtGui import QFont, QColor, QPalette
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QListWidget, QListWidgetItem, QLineEdit, QFrame, QScrollArea, QMessageBox,
-    QTextEdit, QSplitter, QCheckBox
+    QTextEdit, QSplitter, QCheckBox, QSlider
 )
 
 # Локальные импорты
 from voice_client_backend import VoiceClientBackend, pyaudio_available
-from voice_client_constants import SERVER_ADDRESS
+from voice_client_constants import SERVER_ADDRESS, MIN_VOICE_THRESHOLD, MAX_VOICE_THRESHOLD, DEFAULT_VOICE_THRESHOLD, AGGRESSIVE_DTX_THRESHOLD
+
 
 class VoiceChatUI(QWidget):
     def __init__(self, parent):
@@ -49,21 +49,19 @@ class VoiceChatUI(QWidget):
         # Создаем контейнеры для разных стилей
         self.telegram_container = QWidget()
         self.discord_container = QWidget()
-        
+
         self.setup_telegram_ui()
         self.setup_discord_ui()
-        
+
         # Показываем Telegram стиль по умолчанию
         self.main_layout.addWidget(self.telegram_container)
         self.discord_container.hide()
 
     def setup_telegram_ui(self):
-        """Настройка Telegram-стиля интерфейса"""
         layout = QVBoxLayout(self.telegram_container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Верхняя панель (Telegram-style)
         self.setup_telegram_top_bar(layout)
 
         # Список участников (горизонтальный, скрываемый)
@@ -76,7 +74,6 @@ class VoiceChatUI(QWidget):
         self.setup_input_area(layout)
 
     def setup_discord_ui(self):
-        """Настройка Discord-стиля интерфейса"""
         layout = QHBoxLayout(self.discord_container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -93,12 +90,12 @@ class VoiceChatUI(QWidget):
         server_header.setFixedHeight(50)
         server_header_layout = QHBoxLayout(server_header)
         server_header_layout.setContentsMargins(15, 0, 15, 0)
-        
+
         server_name = QLabel("Голосовой чат")
         server_name.setFont(QFont("Arial", 14, QFont.Bold))
         server_header_layout.addWidget(server_name)
         server_header_layout.addStretch()
-        
+
         # Кнопка назад
         back_btn = QPushButton("←")
         back_btn.setFixedSize(30, 30)
@@ -116,7 +113,7 @@ class VoiceChatUI(QWidget):
             }
         """)
         server_header_layout.addWidget(back_btn)
-        
+
         left_layout.addWidget(server_header)
 
         # Список участников (вертикальный)
@@ -140,12 +137,12 @@ class VoiceChatUI(QWidget):
                 background-color: #36393f;
             }
         """)
-        
+
         # Добавляем тестовых участников
         for i in range(5):
             item = QListWidgetItem(f"Участник {i+1}")
             self.discord_participants_list.addItem(item)
-        
+
         left_layout.addWidget(self.discord_participants_list, 1)
 
         # Панель управления голосом
@@ -207,12 +204,12 @@ class VoiceChatUI(QWidget):
         chat_header.setStyleSheet("background-color: #36393f; border-bottom: 1px solid #202225;")
         chat_header_layout = QHBoxLayout(chat_header)
         chat_header_layout.setContentsMargins(15, 0, 15, 0)
-        
+
         chat_name = QLabel("Текстовый чат")
         chat_name.setFont(QFont("Arial", 14, QFont.Bold))
         chat_header_layout.addWidget(chat_name)
         chat_header_layout.addStretch()
-        
+
         right_layout.addWidget(chat_header)
 
         # Область чата
@@ -227,12 +224,13 @@ class VoiceChatUI(QWidget):
                 font-size: 14px;
             }
         """)
-        
+
         # Добавляем тестовые сообщения
         self.discord_chat_area.append("<span style='color: #72767d;'>Добро пожаловать в голосовой чат!</span>")
         self.discord_chat_area.append("<span style='color: #fff;'><b>Участник 1:</b> Привет всем!</span>")
-        self.discord_chat_area.append("<span style='color: #fff; text-align: right; display: block;'><b>Вы:</b> Здравствуйте!</span>")
-        
+        self.discord_chat_area.append(
+            "<span style='color: #fff; text-align: right; display: block;'><b>Вы:</b> Здравствуйте!</span>")
+
         right_layout.addWidget(self.discord_chat_area, 1)
 
         # Поле ввода сообщения
@@ -254,7 +252,7 @@ class VoiceChatUI(QWidget):
             }
         """)
         self.discord_message_input.returnPressed.connect(self.send_discord_message)
-        
+
         self.discord_send_btn = QPushButton("➤")
         self.discord_send_btn.setFixedSize(40, 40)
         self.discord_send_btn.setStyleSheet("""
@@ -364,33 +362,72 @@ class VoiceChatUI(QWidget):
         """Создает меню настроек"""
         self.settings_menu = QWidget()
         self.settings_menu.setWindowTitle("Настройки голосового чата")
-        self.settings_menu.setFixedSize(300, 200)
+        self.settings_menu.setFixedSize(350, 300)
         self.settings_menu.setWindowFlags(Qt.Dialog)
-        
+
         layout = QVBoxLayout(self.settings_menu)
         layout.setContentsMargins(15, 15, 15, 15)
         layout.setSpacing(10)
-        
+
         # Настройка DTX
         dtx_label = QLabel("DTX (Discontinuous Transmission):")
         dtx_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(dtx_label)
-        
+
         dtx_desc = QLabel("Уменьшает трафик при молчании, но может снизить качество голоса")
         dtx_desc.setStyleSheet("color: #AAAAAA; font-size: 11px;")
         dtx_desc.setWordWrap(True)
         layout.addWidget(dtx_desc)
-        
+
         self.dtx_checkbox = QCheckBox("Включить DTX")
         self.dtx_checkbox.setChecked(True)  # Включено по умолчанию
         self.dtx_checkbox.stateChanged.connect(self.toggle_dtx)
         layout.addWidget(self.dtx_checkbox)
-        
+
+        # Агрессивный режим DTX
+        aggressive_label = QLabel("Агрессивный режим DTX:")
+        aggressive_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        layout.addWidget(aggressive_label)
+
+        aggressive_desc = QLabel("Сильнее подавляет фоновые шумы, но может обрезать тихий голос")
+        aggressive_desc.setStyleSheet("color: #AAAAAA; font-size: 11px;")
+        aggressive_desc.setWordWrap(True)
+        layout.addWidget(aggressive_desc)
+
+        self.aggressive_dtx_checkbox = QCheckBox("Включить агрессивный режим")
+        self.aggressive_dtx_checkbox.setChecked(False)
+        self.aggressive_dtx_checkbox.stateChanged.connect(self.toggle_aggressive_dtx)
+        layout.addWidget(self.aggressive_dtx_checkbox)
+
+        # Порог активации голоса
+        threshold_label = QLabel("Чувствительность микрофона:")
+        threshold_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        layout.addWidget(threshold_label)
+
+        threshold_desc = QLabel("Регулирует порог активации голоса (меньше значение = выше чувствительность)")
+        threshold_desc.setStyleSheet("color: #AAAAAA; font-size: 11px;")
+        threshold_desc.setWordWrap(True)
+        layout.addWidget(threshold_desc)
+
+        threshold_layout = QHBoxLayout()
+
+        self.threshold_slider = QSlider(Qt.Horizontal)
+        self.threshold_slider.setRange(MIN_VOICE_THRESHOLD, MAX_VOICE_THRESHOLD)
+        self.threshold_slider.setValue(DEFAULT_VOICE_THRESHOLD)
+        self.threshold_slider.valueChanged.connect(self.update_voice_threshold)
+        threshold_layout.addWidget(self.threshold_slider)
+
+        self.threshold_value = QLabel(str(DEFAULT_VOICE_THRESHOLD))
+        self.threshold_value.setFixedWidth(40)
+        threshold_layout.addWidget(self.threshold_value)
+
+        layout.addLayout(threshold_layout)
+
         # Кнопка закрытия
         close_btn = QPushButton("Закрыть")
         close_btn.clicked.connect(self.settings_menu.hide)
         layout.addWidget(close_btn)
-        
+
         layout.addStretch()
 
     def toggle_dtx(self, state):
@@ -398,11 +435,21 @@ class VoiceChatUI(QWidget):
         if self.voice_client:
             self.voice_client.set_dtx(state == Qt.Checked)
 
-    def show_settings(self):
-        """Показывает меню настроек"""
-        if not hasattr(self, 'settings_menu'):
-            self.setup_settings_menu()
-        self.settings_menu.show()
+    def toggle_aggressive_dtx(self, state):
+        """Включение/выключение агрессивного режима DTX"""
+        if self.voice_client:
+            self.voice_client.set_aggressive_dtx(state == Qt.Checked)
+            # Обновляем слайдер для агрессивного режима
+            if state == Qt.Checked:
+                self.threshold_slider.setValue(AGGRESSIVE_DTX_THRESHOLD)
+            else:
+                self.threshold_slider.setValue(DEFAULT_VOICE_THRESHOLD)
+
+    def update_voice_threshold(self, value):
+        """Обновление порога активации голоса"""
+        self.threshold_value.setText(str(value))
+        if self.voice_client:
+            self.voice_client.set_voice_threshold(value)
 
     def setup_participants_bar(self, layout):
         """Создает панель участников (горизонтальный список)"""
@@ -442,12 +489,12 @@ class VoiceChatUI(QWidget):
         self.chat_area = QTextEdit()
         self.chat_area.setReadOnly(True)
         self.chat_area.setPlaceholderText("Здесь будут отображаться сообщения...")
-        
+
         # Добавляем тестовые сообщения для демонстрации
         self.add_message("Система", "Добро пожаловать в голосовой чат!", False)
         self.add_message("Игрок 1", "Привет всем!", False)
         self.add_message("Вы", "Здравствуйте!", True)
-        
+
         layout.addWidget(self.chat_area, 1)
 
     def setup_input_area(self, layout):
@@ -461,7 +508,7 @@ class VoiceChatUI(QWidget):
         self.message_input = QLineEdit()
         self.message_input.setPlaceholderText("Введите сообщение...")
         self.message_input.returnPressed.connect(self.send_message)
-        
+
         # Кнопка отправки
         self.send_btn = QPushButton("➤")
         self.send_btn.setFixedSize(40, 40)
@@ -491,20 +538,18 @@ class VoiceChatUI(QWidget):
     def resizeEvent(self, event):
         """Обработчик изменения размера окна"""
         width = event.size().width()
-        
+
         if width >= 600 and self.current_style != "discord":
-            # Переключаемся на Discord-стиль
             self.current_style = "discord"
             self.telegram_container.hide()
             self.discord_container.show()
             self.main_layout.addWidget(self.discord_container)
         elif width < 600 and self.current_style != "telegram":
-            # Переключаемся на Telegram-стиль
             self.current_style = "telegram"
             self.discord_container.hide()
             self.telegram_container.show()
             self.main_layout.addWidget(self.telegram_container)
-            
+
         super().resizeEvent(event)
 
     def add_message(self, sender, message, is_me):
@@ -515,21 +560,21 @@ class VoiceChatUI(QWidget):
         else:
             # Сообщение от других - выравниваем по левому краю
             self.chat_area.append(f"<div style='text-align: left;'><b>{sender}:</b> {message}</div>")
-        
+
         # Прокручиваем вниз
         self.chat_area.verticalScrollBar().setValue(
             self.chat_area.verticalScrollBar().maximum()
         )
 
     def send_message(self):
-        """Обработчик отправки сообщения в Telegram-стиле"""
+
+
         message = self.message_input.text().strip()
         if message:
             self.add_message("Вы", message, True)
             self.message_input.clear()
 
     def send_discord_message(self):
-        """Обработчик отправки сообщения в Discord-стиле"""
         message = self.discord_message_input.text().strip()
         if message:
             self.discord_chat_area.append(f"<span style='color: #fff; text-align: right; display: block;'><b>Вы:</b> {message}</span>")
@@ -748,6 +793,12 @@ class VoiceChatUI(QWidget):
         if self.voice_client and self.is_connected:
             self.voice_client.set_transmitting(False)
 
+    def show_settings(self):
+        """Показывает меню настроек"""
+        if not hasattr(self, 'settings_menu'):
+            self.setup_settings_menu()
+        self.settings_menu.show()
+
     def setup_theme(self):
         palette = QPalette()
         palette.setColor(QPalette.Window, QColor(30, 30, 30))
@@ -761,7 +812,6 @@ class VoiceChatUI(QWidget):
         palette.setColor(QPalette.HighlightedText, Qt.white)
         self.setPalette(palette)
         
-        # Стили для Telegram-режима
         self.setStyleSheet("""
             QWidget {
                 background-color: #1e1e1e;

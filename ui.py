@@ -1,4 +1,3 @@
-# ui.py
 import sys
 import os
 import traceback
@@ -103,7 +102,6 @@ class AddonUpdater(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Верхняя панель (Telegram-style)
         self._setup_top_bar(layout)
 
         # Панель состояния игры
@@ -132,7 +130,6 @@ class AddonUpdater(QMainWindow):
         self._setup_addons_list(layout)
 
     def _setup_top_bar(self, parent_layout):
-        """Создает верхнюю панель в стиле Telegram"""
         top_bar = QWidget()
         top_bar.setFixedHeight(50)
         top_bar.setStyleSheet("background-color: #2d2d2d;")
