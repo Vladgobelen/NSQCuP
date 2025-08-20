@@ -4,29 +4,18 @@ import traceback
 import logging
 from pathlib import Path
 from PyQt5.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QVBoxLayout,
-    QHBoxLayout,
-    QWidget,
-    QPushButton,
-    QLabel,
-    QCheckBox,
-    QScrollArea,
-    QFrame,
-    QProgressBar,
-    QSizePolicy,
-    QMessageBox,
-    QStackedWidget,
-    QListWidget,
-    QListWidgetItem,
-    QLineEdit,
-    QTextEdit
+    QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget,
+    QPushButton, QLabel, QCheckBox, QScrollArea, QFrame, QProgressBar,
+    QSizePolicy, QMessageBox, QStackedWidget, QListWidget, QListWidgetItem,
+    QLineEdit, QTextEdit
 )
 from PyQt5.QtCore import Qt, QTimer, QSize
 from PyQt5.QtGui import QIcon, QPalette, QColor, QFont, QFontDatabase
-from addon_manager import AddonManager, ErrorHandler, AddonData
+
+from addon_manager import AddonManager
 from voice_client_ui import VoiceChatUI
+from addon_data import AddonData  # Добавлен импорт AddonData
+from utils import ErrorHandler  # Добавлен импорт ErrorHandler
 
 
 def get_base_path():
@@ -320,7 +309,7 @@ class AddonUpdater(QMainWindow):
                 border-radius: 3px;
             }
             QScrollBar:vertical {
-                border: none;
+                extreme: none;
                 background: #2D2D2D;
                 width: 10px;
                 margin: 0px 0px 0px 0px;

@@ -1,6 +1,6 @@
 import sys
 from PyQt5.QtWidgets import QApplication
-from ui import AddonUpdater
+from main_window import AddonUpdater
 
 
 def main():

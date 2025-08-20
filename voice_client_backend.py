@@ -40,7 +40,7 @@ class VoiceClientBackend(QObject):
         self.use_dtx = True  # DTX включен по умолчанию
         self.aggressive_dtx = False  # Агрессивный режим DTX
         self.voice_threshold = DEFAULT_VOICE_THRESHOLD  # Порог активации голоса
-        self.silence_frames = 0  # Счетчик кадров тишины
+        self.silence_frames = 0  # Счетчик кадров тишина
         self.silence_threshold = 5  # Количество тихих кадров перед отключением
 
         # Аудио буферы
@@ -268,7 +268,7 @@ class VoiceClientBackend(QObject):
                 frames_per_buffer=FRAME_SIZE
             )
 
-            self.logger.info("Аудио потоки успешно инициализированы")
+            self.logger.info("Аудио потоки успешно инициализированны")
             return True
 
         except Exception as e:

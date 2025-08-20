@@ -53,7 +53,6 @@ class VoiceChatUI(QWidget):
         self.setup_telegram_ui()
         self.setup_discord_ui()
 
-        # Показываем Telegram стиль по умолчанию
         self.main_layout.addWidget(self.telegram_container)
         self.discord_container.hide()
 
@@ -280,7 +279,6 @@ class VoiceChatUI(QWidget):
         layout.addWidget(right_panel, 1)
 
     def setup_telegram_top_bar(self, layout):
-        """Создает верхнюю панель в стиле Telegram"""
         top_bar = QWidget()
         top_bar.setFixedHeight(50)
         top_layout = QHBoxLayout(top_bar)
@@ -432,18 +430,15 @@ class VoiceChatUI(QWidget):
 
     def toggle_dtx(self, state):
         """Включение/выключение DTX"""
+        self.use_dtx = state == Qt.Checked
         if self.voice_client:
-            self.voice_client.set_dtx(state == Qt.Checked)
+            self.voice_client.set_dtx(self.use_dtx)
 
     def toggle_aggressive_dtx(self, state):
         """Включение/выключение агрессивного режима DTX"""
+        self.aggressive_dtx = state == Qt.Checked
         if self.voice_client:
-            self.voice_client.set_aggressive_dtx(state == Qt.Checked)
-            # Обновляем слайдер для агрессивного режима
-            if state == Qt.Checked:
-                self.threshold_slider.setValue(AGGRESSIVE_DTX_THRESHOLD)
-            else:
-                self.threshold_slider.setValue(DEFAULT_VOICE_THRESHOLD)
+            self.voice_client.set_aggressive_dtx(self.aggressive_dtx)
 
     def update_voice_threshold(self, value):
         """Обновление порога активации голоса"""
@@ -567,8 +562,6 @@ class VoiceChatUI(QWidget):
         )
 
     def send_message(self):
-
-
         message = self.message_input.text().strip()
         if message:
             self.add_message("Вы", message, True)
@@ -579,7 +572,7 @@ class VoiceChatUI(QWidget):
         if message:
             self.discord_chat_area.append(f"<span style='color: #fff; text-align: right; display: block;'><b>Вы:</b> {message}</span>")
             self.discord_message_input.clear()
-            
+
             # Прокручиваем вниз
             self.discord_chat_area.verticalScrollBar().setValue(
                 self.discord_chat_area.verticalScrollBar().maximum()
@@ -591,12 +584,12 @@ class VoiceChatUI(QWidget):
             is_checked = self.mic_btn.isChecked()
         else:
             is_checked = self.discord_mic_btn.isChecked()
-            
+
         if is_checked:
             self.start_talking()
         else:
             self.stop_talking()
-            
+
         self.update_mic_button_style()
 
     def toggle_participants(self, event):
@@ -811,7 +804,7 @@ class VoiceChatUI(QWidget):
         palette.setColor(QPalette.Highlight, QColor(65, 130, 210))
         palette.setColor(QPalette.HighlightedText, Qt.white)
         self.setPalette(palette)
-        
+
         self.setStyleSheet("""
             QWidget {
                 background-color: #1e1e1e;

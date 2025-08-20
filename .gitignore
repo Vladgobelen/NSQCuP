@@ -2,15 +2,17 @@
 *
 
 # Исключения (не игнорировать)
-!/.gitignore
+
 !/main.py
-!/voice_client_ui.py
 !/utils.py
-!/ui.py
+!/addon_data.py
+!/install_thread.py
 !/addon_manager.py
+!/main_window.py
+!/voice_client_ui.py
+!/voice_client_backend.py
 !/voice_client_utils.py
 !/voice_client_constants.py
-!/voice_client_backend.py
 
 # Дополнительные исключения для системных файлов Git
 !.git/
