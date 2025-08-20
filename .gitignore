@@ -15,6 +15,7 @@
 !/voice_client_constants.py
 !/libopus.dll
 !/libopus.so.0.10.1
+!/Архитектура.txt
 # Дополнительные исключения для системных файлов Git
 !.git/
 !.git/*
