@@ -12,7 +12,7 @@ OPUS_SET_VBR_REQUEST = 10006
 OPUS_APPLICATION_AUDIO = 2049
 
 # Настройки голосовой активации
-DEFAULT_VOICE_THRESHOLD = 50  # Порог активации по умолчанию
+DEFAULT_VOICE_THRESHOLD = 100  # Порог активации по умолчанию
 MIN_VOICE_THRESHOLD = 50      # Минимальный порог
 MAX_VOICE_THRESHOLD = 2000     # Максимальный порог
-AGGRESSIVE_DTX_THRESHOLD = 100  # Порог для агрессивного режима
+AGGRESSIVE_DTX_THRESHOLD = 200  # Порог для агрессивного режима

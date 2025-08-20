@@ -6,7 +6,7 @@ from PyQt5.QtGui import QFont, QColor, QPalette
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QListWidget, QListWidgetItem, QLineEdit, QFrame, QScrollArea, QMessageBox,
-    QTextEdit, QSplitter, QCheckBox, QSlider
+    QTextEdit, QSplitter, QCheckBox, QSlider, QSpacerItem, QSizePolicy
 )
 
 # Локальные импорты
@@ -94,6 +94,23 @@ class VoiceChatUI(QWidget):
         server_name.setFont(QFont("Arial", 14, QFont.Bold))
         server_header_layout.addWidget(server_name)
         server_header_layout.addStretch()
+
+        # Кнопка настроек (добавлена)
+        self.discord_settings_btn = QPushButton("⚙")
+        self.discord_settings_btn.setFixedSize(30, 30)
+        self.discord_settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                background-color: #3d3d3d;
+                border-radius: 15px;
+            }
+        """)
+        self.discord_settings_btn.clicked.connect(self.show_settings)
+        server_header_layout.addWidget(self.discord_settings_btn)
 
         # Кнопка назад
         back_btn = QPushButton("←")
@@ -345,7 +362,7 @@ class VoiceChatUI(QWidget):
         self.mic_btn.setFixedSize(40, 40)
         self.mic_btn.setCheckable(True)
         self.mic_btn.setEnabled(False)
-        self.update_mic_button_style()
+        # Убрали вызов update_mic_button_style() здесь, так как элементы Discord еще не созданы
         self.mic_btn.clicked.connect(self.toggle_microphone)
 
         top_layout.addWidget(self.back_btn)
@@ -360,12 +377,12 @@ class VoiceChatUI(QWidget):
         """Создает меню настроек"""
         self.settings_menu = QWidget()
         self.settings_menu.setWindowTitle("Настройки голосового чата")
-        self.settings_menu.setFixedSize(350, 300)
+        self.settings_menu.setFixedSize(350, 400)  # Увеличена высота для лучшего отступа
         self.settings_menu.setWindowFlags(Qt.Dialog)
 
         layout = QVBoxLayout(self.settings_menu)
         layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(10)
+        layout.setSpacing(15)  # Увеличен spacing между элементами
 
         # Настройка DTX
         dtx_label = QLabel("DTX (Discontinuous Transmission):")
@@ -382,9 +399,12 @@ class VoiceChatUI(QWidget):
         self.dtx_checkbox.stateChanged.connect(self.toggle_dtx)
         layout.addWidget(self.dtx_checkbox)
 
+        # Добавляем отступ
+        layout.addSpacing(10)
+
         # Агрессивный режим DTX
         aggressive_label = QLabel("Агрессивный режим DTX:")
-        aggressive_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        aggressive_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(aggressive_label)
 
         aggressive_desc = QLabel("Сильнее подавляет фоновые шумы, но может обрезать тихий голос")
@@ -397,9 +417,12 @@ class VoiceChatUI(QWidget):
         self.aggressive_dtx_checkbox.stateChanged.connect(self.toggle_aggressive_dtx)
         layout.addWidget(self.aggressive_dtx_checkbox)
 
+        # Добавляем отступ
+        layout.addSpacing(10)
+
         # Порог активации голоса
         threshold_label = QLabel("Чувствительность микрофона:")
-        threshold_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        threshold_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(threshold_label)
 
         threshold_desc = QLabel("Регулирует порог активации голоса (меньше значение = выше чувствительность)")
@@ -421,12 +444,13 @@ class VoiceChatUI(QWidget):
 
         layout.addLayout(threshold_layout)
 
+        # Добавляем растягивающийся отступ
+        layout.addStretch()
+
         # Кнопка закрытия
         close_btn = QPushButton("Закрыть")
         close_btn.clicked.connect(self.settings_menu.hide)
         layout.addWidget(close_btn)
-
-        layout.addStretch()
 
     def toggle_dtx(self, state):
         """Включение/выключение DTX"""
@@ -539,11 +563,15 @@ class VoiceChatUI(QWidget):
             self.telegram_container.hide()
             self.discord_container.show()
             self.main_layout.addWidget(self.discord_container)
+            # Обновляем состояние кнопки микрофона при смене режима
+            self.update_mic_button_style()
         elif width < 600 and self.current_style != "telegram":
             self.current_style = "telegram"
             self.discord_container.hide()
             self.telegram_container.show()
             self.main_layout.addWidget(self.telegram_container)
+            # Обновляем состояние кнопки микрофона при смене режима
+            self.update_mic_button_style()
 
         super().resizeEvent(event)
 
@@ -602,88 +630,94 @@ class VoiceChatUI(QWidget):
 
     def update_mic_button_style(self):
         """Обновляет стиль кнопки микрофона в зависимости от состояния"""
+        # Обновляем обе кнопки одновременно для согласованности
         if not self.is_connected:
             # Отключено от сервера - серый
-            mic_style = """
-                background-color: #95a5a6;
-                border: none;
-                border-radius: 20px;
-                font-size: 18px;
+            telegram_style = """
+                QPushButton {
+                    background-color: #95a5a6;
+                    border: none;
+                    border-radius: 20px;
+                    font-size: 18px;
+                }
             """
-            if self.current_style == "telegram":
-                self.mic_btn.setStyleSheet(f"QPushButton {{ {mic_style} }}")
-            else:
-                self.discord_mic_btn.setStyleSheet("""
-                    QPushButton {
-                        background-color: #4f545c;
-                        border: none;
-                        border-radius: 4px;
-                        color: white;
-                        font-weight: bold;
-                    }
-                """)
-                self.discord_status_label.setText("Не подключено")
-                self.discord_status_label.setStyleSheet("color: #ed4245; font-size: 12px;")
+            discord_style = """
+                QPushButton {
+                    background-color: #4f545c;
+                    border: none;
+                    border-radius: 4px;
+                    color: white;
+                    font-weight: bold;
+                }
+            """
+            discord_status = "Не подключено"
+            discord_status_color = "#ed4245"
         elif not self.is_talking:
-            # Подключено, микрофон выключен - зеленый
-            if self.current_style == "telegram":
-                self.mic_btn.setStyleSheet("""
-                    QPushButton {
-                        background-color: #2ecc71;
-                        border: none;
-                        border-radius: 20px;
-                        font-size: 18px;
-                    }
-                    QPushButton:hover {
-                        background-color: #27ae60;
-                    }
-                """)
-            else:
-                self.discord_mic_btn.setStyleSheet("""
-                    QPushButton {
-                        background-color: #43b581;
-                        border: none;
-                        border-radius: 4px;
-                        color: white;
-                        font-weight: bold;
-                    }
-                    QPushButton:hover {
-                        opacity: 0.8;
-                    }
-                """)
-                self.discord_mic_btn.setText("Выключить микрофон")
-                self.discord_status_label.setText("Подключено")
-                self.discord_status_label.setStyleSheet("color: #43b581; font-size: 12px;")
+            # Подключено, микрофон выключен - КРАСНЫЙ (ожидание)
+            telegram_style = """
+                QPushButton {
+                    background-color: #e74c3c;
+                    border: none;
+                    border-radius: 20px;
+                    font-size: 18px;
+                }
+                QPushButton:hover {
+                    background-color: #c0392b;
+                }
+            """
+            discord_style = """
+                QPushButton {
+                    background-color: #ed4245;
+                    border: none;
+                    border-radius: 4px;
+                    color: white;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    opacity: 0.8;
+                }
+            """
+            discord_status = "Подключено"
+            discord_status_color = "#ed4245"
         else:
-            # Микрофон включен - красный
-            if self.current_style == "telegram":
-                self.mic_btn.setStyleSheet("""
-                    QPushButton {
-                        background-color: #e74c3c;
-                        border: none;
-                        border-radius: 20px;
-                        font-size: 18px;
-                    }
-                    QPushButton:hover {
-                        background-color: #c0392b;
-                    }
-                """)
-            else:
-                self.discord_mic_btn.setStyleSheet("""
-                    QPushButton {
-                        background-color: #ed4245;
-                        border: none;
-                        border-radius: 4px;
-                        color: white;
-                        font-weight: bold;
-                    }
-                    QPushButton:hover {
-                        opacity: 0.8;
-                    }
-                """)
-                self.discord_mic_btn.setText("Включить микрофон")
-                self.discord_status_label.setText("Говорите...")
-                self.discord_status_label.setStyleSheet("color: #ed4245; font-size: 12px;")
+            # Микрофон включен - ЗЕЛЁНЫЙ (передача)
+            telegram_style = """
+                QPushButton {
+                    background-color: #2ecc71;
+                    border: none;
+                    border-radius: 20px;
+                    font-size: 18px;
+                }
+                QPushButton:hover {
+                    background-color: #27ae60;
+                }
+            """
+            discord_style = """
+                QPushButton {
+                    background-color: #43b581;
+                    border: none;
+                    border-radius: 4px;
+                    color: white;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    opacity: 0.8;
+                }
+            """
+            discord_status = "Говорите..."
+            discord_status_color = "#43b581"
+
+        # Применяем стили к обеим кнопкам, если они существуют
+        self.mic_btn.setStyleSheet(telegram_style)
+
+        # Проверяем, существует ли атрибут discord_mic_btn
+        if hasattr(self, 'discord_mic_btn'):
+            self.discord_mic_btn.setStyleSheet(discord_style)
+
+        # Обновляем статус в Discord режиме, если соответствующие атрибуты существуют
+        if hasattr(self, 'discord_status_label'):
+            self.discord_status_label.setText(discord_status)
+            self.discord_status_label.setStyleSheet(f"color: {discord_status_color}; font-size: 12px;")
 
     def update_status(self, status):
         self.logger.info(f"Статус обновлен: {status}")
