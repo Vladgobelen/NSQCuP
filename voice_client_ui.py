@@ -6,11 +6,11 @@ from PyQt5.QtGui import QFont, QColor, QPalette
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QListWidget, QListWidgetItem, QLineEdit, QFrame, QScrollArea, QMessageBox,
-    QTextEdit, QSplitter, QCheckBox, QSlider, QSpacerItem, QSizePolicy, QStackedWidget
+    QTextEdit, QSplitter, QCheckBox, QSlider, QSpacerItem, QSizePolicy, QStackedWidget, QGroupBox
 )
 # Локальные импорты
 from voice_client_backend import VoiceClientBackend, pyaudio_available
-from voice_client_constants import SERVER_ADDRESS, MIN_VOICE_THRESHOLD, MAX_VOICE_THRESHOLD, DEFAULT_VOICE_THRESHOLD, AGGRESSIVE_DTX_THRESHOLD, BITRATE
+from voice_client_constants import SERVER_ADDRESS, BITRATE, DTX_DEFAULT_ENABLED, DTX_DEFAULT_PACKET_LOSS_PERCENT  # Обновлен импорт
 
 
 class VoiceChatUI(QWidget):
@@ -24,6 +24,7 @@ class VoiceChatUI(QWidget):
         self.is_talking = False
         self.participants_visible = False
         self.current_style = "telegram"  # или "discord"
+        self.resize_pending = False
         # Настройка логирования
         if not hasattr(self, 'logger_configured'):
             if not os.path.exists('logs'):
@@ -42,26 +43,20 @@ class VoiceChatUI(QWidget):
         self.setLayout(self.main_layout)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
-
         # Создаем QStackedWidget для управления переключением между режимами
         self.stacked_container = QStackedWidget()
-
         # Создаем контейнеры для разных стилей
         self.telegram_container = QWidget()
         self.discord_container = QWidget()
-
         # Настройка интерфейсов
         self.setup_telegram_ui()
         self.setup_discord_ui()
-
         # Добавляем контейнеры в стек
         self.stacked_container.addWidget(self.telegram_container)
         self.stacked_container.addWidget(self.discord_container)
-
         # Устанавливаем текущий режим
         self.current_style = "telegram"
-        self.stacked_container.setCurrentWidget(self.telegram_container)
-
+        self.stacked_container.setCurrentIndex(0)
         # Добавляем стек в основной макет
         self.main_layout.addWidget(self.stacked_container)
 
@@ -70,15 +65,6 @@ class VoiceChatUI(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self.setup_telegram_top_bar(layout)
-        # Панель статистики
-        self.stats_widget = QWidget()
-        self.stats_widget.setFixedHeight(30)
-        stats_layout = QHBoxLayout(self.stats_widget)
-        stats_layout.setContentsMargins(10, 0, 10, 0)
-        self.stats_label = QLabel("Статистика: Не подключено")
-        self.stats_label.setStyleSheet("color: #AAAAAA; font-size: 10px;")
-        stats_layout.addWidget(self.stats_label)
-        layout.addWidget(self.stats_widget)
         # Список участников (горизонтальный, скрываемый)
         self.setup_participants_bar(layout)
         # Область чата
@@ -139,15 +125,6 @@ class VoiceChatUI(QWidget):
         """)
         server_header_layout.addWidget(back_btn)
         left_layout.addWidget(server_header)
-        # Панель статистики для Discord
-        discord_stats = QWidget()
-        discord_stats.setFixedHeight(30)
-        discord_stats_layout = QHBoxLayout(discord_stats)
-        discord_stats_layout.setContentsMargins(15, 0, 15, 0)
-        self.discord_stats_label = QLabel("Статистика: Не подключено")
-        self.discord_stats_label.setStyleSheet("color: #72767d; font-size: 10px;")
-        discord_stats_layout.addWidget(self.discord_stats_label)
-        left_layout.addWidget(discord_stats)
         # Список участников (вертикальный)
         participants_label = QLabel("Участники голосового канала")
         participants_label.setContentsMargins(15, 10, 15, 5)
@@ -179,11 +156,6 @@ class VoiceChatUI(QWidget):
         voice_control.setStyleSheet("background-color: #292b2f;")
         voice_layout = QVBoxLayout(voice_control)
         voice_layout.setContentsMargins(10, 10, 10, 10)
-        # Индикатор подключения
-        self.discord_status_label = QLabel("Не подключено")
-        self.discord_status_label.setAlignment(Qt.AlignCenter)
-        self.discord_status_label.setStyleSheet("color: #72767d; font-size: 12px;")
-        voice_layout.addWidget(self.discord_status_label)
         # Кнопка микрофона
         self.discord_mic_btn = QPushButton("Выключить микрофон")
         self.discord_mic_btn.setCheckable(True)
@@ -366,56 +338,11 @@ class VoiceChatUI(QWidget):
         """Создает меню настроек"""
         self.settings_menu = QWidget()
         self.settings_menu.setWindowTitle("Настройки голосового чата")
-        self.settings_menu.setFixedSize(350, 500)  # Увеличена высота для новых настроек
+        self.settings_menu.setFixedSize(350, 350)  # Увеличена высота для новых настроек
         self.settings_menu.setWindowFlags(Qt.Dialog)
         layout = QVBoxLayout(self.settings_menu)
         layout.setContentsMargins(15, 15, 15, 15)
         layout.setSpacing(15)
-        # Настройка DTX
-        dtx_label = QLabel("DTX (Discontinuous Transmission):")
-        dtx_label.setStyleSheet("font-weight: bold;")
-        layout.addWidget(dtx_label)
-        dtx_desc = QLabel("Уменьшает трафик при молчании, но может снизить качество голоса")
-        dtx_desc.setStyleSheet("color: #AAAAAA; font-size: 11px;")
-        dtx_desc.setWordWrap(True)
-        layout.addWidget(dtx_desc)
-        self.dtx_checkbox = QCheckBox("Включить DTX")
-        self.dtx_checkbox.setChecked(False)  # Выключено по умолчанию
-        self.dtx_checkbox.stateChanged.connect(self.toggle_dtx)
-        layout.addWidget(self.dtx_checkbox)
-        layout.addSpacing(10)
-        # Агрессивный режим DTX
-        aggressive_label = QLabel("Агрессивный режим DTX:")
-        aggressive_label.setStyleSheet("font-weight: bold;")
-        layout.addWidget(aggressive_label)
-        aggressive_desc = QLabel("Сильнее подавляет фоновые шумы, но может обрезать тихий голос")
-        aggressive_desc.setStyleSheet("color: #AAAAAA; font-size: 11px;")
-        aggressive_desc.setWordWrap(True)
-        layout.addWidget(aggressive_desc)
-        self.aggressive_dtx_checkbox = QCheckBox("Включить агрессивный режим")
-        self.aggressive_dtx_checkbox.setChecked(False)
-        self.aggressive_dtx_checkbox.stateChanged.connect(self.toggle_aggressive_dtx)
-        layout.addWidget(self.aggressive_dtx_checkbox)
-        layout.addSpacing(10)
-        # Порог активации голоса
-        threshold_label = QLabel("Чувствительность микрофона:")
-        threshold_label.setStyleSheet("font-weight: bold;")
-        layout.addWidget(threshold_label)
-        threshold_desc = QLabel("Регулирует порог активации голоса (меньше значение = выше чувствительность)")
-        threshold_desc.setStyleSheet("color: #AAAAAA; font-size: 11px;")
-        threshold_desc.setWordWrap(True)
-        layout.addWidget(threshold_desc)
-        threshold_layout = QHBoxLayout()
-        self.threshold_slider = QSlider(Qt.Horizontal)
-        self.threshold_slider.setRange(MIN_VOICE_THRESHOLD, MAX_VOICE_THRESHOLD)
-        self.threshold_slider.setValue(DEFAULT_VOICE_THRESHOLD)
-        self.threshold_slider.valueChanged.connect(self.update_voice_threshold)
-        threshold_layout.addWidget(self.threshold_slider)
-        self.threshold_value = QLabel(str(DEFAULT_VOICE_THRESHOLD))
-        self.threshold_value.setFixedWidth(40)
-        threshold_layout.addWidget(self.threshold_value)
-        layout.addLayout(threshold_layout)
-        layout.addSpacing(10)
         # Информация о битрейте
         bitrate_label = QLabel("Текущий битрейт:")
         bitrate_label.setStyleSheet("font-weight: bold;")
@@ -423,33 +350,41 @@ class VoiceChatUI(QWidget):
         bitrate_value = QLabel(f"{BITRATE // 1000} kbps (оптимизирован для голоса)")
         bitrate_value.setStyleSheet("color: #3498db;")
         layout.addWidget(bitrate_value)
-        bitrate_info = QLabel("Битрейт установлен на 64 kbps для оптимального качества голоса")
+        bitrate_info = QLabel("Битрейт установлен на 24 kbps для оптимального качества голоса")
         bitrate_info.setStyleSheet("color: #AAAAAA; font-size: 11px;")
         bitrate_info.setWordWrap(True)
         layout.addWidget(bitrate_info)
+
+        # Новая группа настроек DTX
+        dtx_group = QGroupBox("Настройки DTX (Discontinuous Transmission)")
+        dtx_layout = QVBoxLayout(dtx_group)
+
+        # Чекбокс для включения DTX
+        self.dtx_checkbox = QCheckBox("Включить DTX")
+        self.dtx_checkbox.setChecked(DTX_DEFAULT_ENABLED)  # Установка значения по умолчанию
+        self.dtx_checkbox.stateChanged.connect(self.on_dtx_toggled)
+        dtx_layout.addWidget(self.dtx_checkbox)
+
+        # Слайдер для процента потерь пакетов
+        self.dtx_slider_label = QLabel(f"Ожидаемый процент потерь пакетов: {DTX_DEFAULT_PACKET_LOSS_PERCENT}%")
+        self.dtx_slider_label.setStyleSheet("color: #AAAAAA; font-size: 11px;")
+        dtx_layout.addWidget(self.dtx_slider_label)
+
+        self.dtx_slider = QSlider(Qt.Horizontal)
+        self.dtx_slider.setRange(0, 100)
+        self.dtx_slider.setValue(DTX_DEFAULT_PACKET_LOSS_PERCENT)  # Установка значения по умолчанию
+        self.dtx_slider.valueChanged.connect(self.on_dtx_slider_changed)
+        # Устанавливаем начальное состояние слайдера в зависимости от чекбокса
+        self.dtx_slider.setEnabled(DTX_DEFAULT_ENABLED)
+        dtx_layout.addWidget(self.dtx_slider)
+
+        layout.addWidget(dtx_group)
+
         layout.addStretch()
         # Кнопка закрытия
         close_btn = QPushButton("Закрыть")
         close_btn.clicked.connect(self.settings_menu.hide)
         layout.addWidget(close_btn)
-
-    def toggle_dtx(self, state):
-        """Включение/выключение DTX"""
-        self.use_dtx = state == Qt.Checked
-        if self.voice_client:
-            self.voice_client.set_dtx(self.use_dtx)
-
-    def toggle_aggressive_dtx(self, state):
-        """Включение/выключение агрессивного режима DTX"""
-        self.aggressive_dtx = state == Qt.Checked
-        if self.voice_client:
-            self.voice_client.set_aggressive_dtx(self.aggressive_dtx)
-
-    def update_voice_threshold(self, value):
-        """Обновление порога активации голоса"""
-        self.threshold_value.setText(str(value))
-        if self.voice_client:
-            self.voice_client.set_voice_threshold(value)
 
     def setup_participants_bar(self, layout):
         """Создает панель участников (горизонтальный список)"""
@@ -522,16 +457,23 @@ class VoiceChatUI(QWidget):
 
     def resizeEvent(self, event):
         """Обработчик изменения размера окна"""
-        width = event.size().width()
-        if width >= 800 and self.current_style != "discord":
-            self.current_style = "discord"
-            self.stacked_container.setCurrentWidget(self.discord_container)
-            self.update_mic_button_style()
-        elif width < 800 and self.current_style != "telegram":
-            self.current_style = "telegram"
-            self.stacked_container.setCurrentWidget(self.telegram_container)
-            self.update_mic_button_style()
-        super().resizeEvent(event)
+        # Защита от рекурсивных вызовов
+        if self.resize_pending:
+            return
+        self.resize_pending = True
+        try:
+            width = event.size().width()
+            if width >= 600 and self.current_style != "discord":
+                self.current_style = "discord"
+                self.stacked_container.setCurrentIndex(1)
+                self.update_mic_button_style()  # Добавлено
+            elif width < 600 and self.current_style != "telegram":
+                self.current_style = "telegram"
+                self.stacked_container.setCurrentIndex(0)
+                self.update_mic_button_style()  # Добавлено
+        finally:
+            self.resize_pending = False
+            super().resizeEvent(event)
 
     def add_message(self, sender, message, is_me):
         """Добавляет сообщение в чат с правильным выравниванием"""
@@ -580,6 +522,9 @@ class VoiceChatUI(QWidget):
 
     def update_mic_button_style(self):
         """Обновляет стиль кнопки микрофона в зависимости от состояния"""
+        # Обновляем состояние обеих кнопок независимо от стиля
+        self.mic_btn.setEnabled(self.is_connected)
+        self.discord_mic_btn.setEnabled(self.is_connected)
         if not self.is_connected:
             # Отключено от сервера - серый
             telegram_style = """
@@ -599,8 +544,8 @@ class VoiceChatUI(QWidget):
                     font-weight: bold;
                 }
             """
-            discord_status = "Не подключено"
-            discord_status_color = "#ed4245"
+            # discord_status = "Не подключено"
+            # discord_status_color = "#ed4245"
         elif not self.is_talking:
             # Подключено, микрофон выключен - КРАСНЫЙ (ожидание)
             telegram_style = """
@@ -626,8 +571,8 @@ class VoiceChatUI(QWidget):
                     opacity: 0.8;
                 }
             """
-            discord_status = "Подключено"
-            discord_status_color = "#ed4245"
+            # discord_status = "Подключено"
+            # discord_status_color = "#ed4245"
         else:
             # Микрофон включен - ЗЕЛЁНЫЙ (передача)
             telegram_style = """
@@ -653,26 +598,15 @@ class VoiceChatUI(QWidget):
                     opacity: 0.8;
                 }
             """
-            discord_status = "Говорите..."
-            discord_status_color = "#43b581"
-        # Применяем стили к обеим кнопкам, если они существуют
-        self.mic_btn.setStyleSheet(telegram_style)
-        # Проверяем, существует ли атрибут discord_mic_btn
-        if hasattr(self, 'discord_mic_btn'):
+        # Применяем стили к текущей активной кнопке
+        if self.current_style == "telegram":
+            self.mic_btn.setStyleSheet(telegram_style)
+        else:
             self.discord_mic_btn.setStyleSheet(discord_style)
-        # Обновляем статус в Discord режиме, если соответствующие атрибуты существуют
-        if hasattr(self, 'discord_status_label'):
-            self.discord_status_label.setText(discord_status)
-            self.discord_status_label.setStyleSheet(f"color: {discord_status_color}; font-size: 12px;")
 
     def update_status(self, status):
         """Обновление статуса соединения"""
         self.logger.info(f"Статус обновлен: {status}")
-        # Обновляем статистику в обоих режимах
-        if self.current_style == "telegram":
-            self.stats_label.setText(status)
-        else:
-            self.discord_stats_label.setText(status)
 
     def show_error(self, message):
         error_msg = f"Ошибка: {message}"
@@ -703,14 +637,11 @@ class VoiceChatUI(QWidget):
             self.voice_client.log_message.connect(self.logger.info)
             self.voice_client.connection_update.connect(self.update_connection_status)
             self.voice_client.transmission_update.connect(self.update_transmission_status)
+            # Подключаемся к сигналу обновления настроек DTX
+            self.voice_client.dtx_settings_update.connect(self.update_dtx_ui_from_backend)
             # Подключаемся к серверу
             if self.voice_client.connect_to_server(SERVER_ADDRESS[0], SERVER_ADDRESS[1]):
                 self.is_connected = True
-                if self.current_style == "telegram":
-                    self.mic_btn.setEnabled(True)
-                else:
-                    self.discord_mic_btn.setEnabled(True)
-                self.update_mic_button_style()
                 if self.current_style == "telegram":
                     self.add_message("Система", "Успешно подключено к серверу", False)
                 else:
@@ -728,28 +659,20 @@ class VoiceChatUI(QWidget):
             self.voice_client = None
         self.is_connected = False
         if self.current_style == "telegram":
-            self.mic_btn.setEnabled(False)
-            self.mic_btn.setChecked(False)
-        else:
-            self.discord_mic_btn.setEnabled(False)
-            self.discord_mic_btn.setChecked(False)
-        self.update_mic_button_style()
-        if self.current_style == "telegram":
             self.add_message("Система", "Отключено от сервера", False)
         else:
             self.discord_chat_area.append("<span style='color: #72767d;'>Отключено от сервера</span>")
 
     def update_connection_status(self, connected):
         self.is_connected = connected
-        if self.current_style == "telegram":
-            self.mic_btn.setEnabled(connected)
-            if not connected:
-                self.mic_btn.setChecked(False)
-        else:
-            self.discord_mic_btn.setEnabled(connected)
-            if not connected:
-                self.discord_mic_btn.setChecked(False)
-        self.update_mic_button_style()
+        # Обновляем состояние обеих кнопок независимо от стиля
+        self.mic_btn.setEnabled(connected)
+        self.discord_mic_btn.setEnabled(connected)
+        if not connected:
+            # Сбрасываем состояние кнопок при отключении
+            self.mic_btn.setChecked(False)
+            self.discord_mic_btn.setChecked(False)
+        self.update_mic_button_style()  # Обновляем стиль для текущей активной кнопки
 
     def update_transmission_status(self, transmitting):
         self.is_talking = transmitting
@@ -758,6 +681,35 @@ class VoiceChatUI(QWidget):
         else:
             self.discord_mic_btn.setChecked(transmitting)
         self.update_mic_button_style()
+
+    def update_dtx_ui_from_backend(self, enabled: bool, packet_loss_percent: int):
+        """Обновляет UI на основе настроек DTX, полученных от бэкенда"""
+        if hasattr(self, 'dtx_checkbox') and hasattr(self, 'dtx_slider'):
+            self.dtx_checkbox.blockSignals(True)
+            self.dtx_slider.blockSignals(True)
+            self.dtx_checkbox.setChecked(enabled)
+            self.dtx_slider.setValue(packet_loss_percent)
+            self.dtx_slider.setEnabled(enabled)
+            self.dtx_slider_label.setText(f"Ожидаемый процент потерь пакетов: {packet_loss_percent}%")
+            self.dtx_checkbox.blockSignals(False)
+            self.dtx_slider.blockSignals(False)
+
+    def on_dtx_toggled(self, state):
+        """Обработчик изменения состояния чекбокса DTX"""
+        if self.voice_client and self.is_connected:
+            enabled = state == Qt.Checked
+            self.voice_client.set_dtx(enabled)
+            # Обновляем состояние слайдера
+            self.dtx_slider.setEnabled(enabled)
+            # Обновляем метку слайдера
+            self.dtx_slider_label.setText(f"Ожидаемый процент потерь пакетов: {self.dtx_slider.value()}%")
+
+    def on_dtx_slider_changed(self, value):
+        """Обработчик изменения значения слайдера DTX"""
+        if self.voice_client and self.is_connected:
+            self.voice_client.set_dtx_packet_loss_percent(value)
+            # Обновляем метку слайдера
+            self.dtx_slider_label.setText(f"Ожидаемый процент потерь пакетов: {value}%")
 
     def start_talking(self):
         if self.voice_client and self.is_connected:
@@ -812,6 +764,33 @@ class VoiceChatUI(QWidget):
                 background: #444;
                 min-height: 20px;
                 border-radius: 4px;
+            }
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #444;
+                border-radius: 5px;
+                margin-top: 1ex; /* оставляем место для заголовка */
+                padding-top: 10px; /* отступ внутри группы */
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top center; /* позиционируем заголовок по центру сверху */
+                padding: 0 5px;
+                background-color: #1e1e1e;
+            }
+            QSlider::groove:horizontal {
+                border: 1px solid #999999;
+                height: 8px; /* высота трека */
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #B1B1B1, stop:1 #c4c4c4);
+                margin: 2px 0;
+            }
+
+            QSlider::handle:horizontal {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #b4b4b4, stop:1 #8f8f8f);
+                border: 1px solid #5c5c5c;
+                width: 18px;
+                margin: -2px 0; /* увеличиваем размер ручки */
+                border-radius: 3px;
             }
         """)
 
