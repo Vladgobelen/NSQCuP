@@ -43,6 +43,9 @@ class VoiceClientBackend(QObject):
         # Аудио буферы
         self.playback_buffer = deque(maxlen=SAMPLE_RATE * BUFFER_DURATION_MS // 1000)
         self.audio_queue = queue.Queue()
+        # Jitter buffer
+        self.jitter_buffer = deque(maxlen=JITTER_BUFFER_MAX_SIZE)
+        self.jitter_buffer_lock = threading.Lock()
         # Сеть
         self.socket = None
         self.server_address = None
@@ -57,6 +60,8 @@ class VoiceClientBackend(QObject):
         self.packets_received = 0
         self.packets_lost = 0
         self.last_stat_time = time.time()
+        self.sequence_number = 0
+        self.last_received_seq = 0
         # Потоки
         self.threads = []
         # Opus
@@ -92,7 +97,7 @@ class VoiceClientBackend(QObject):
             self.encoder = self.opus.opus_encoder_create(SAMPLE_RATE, CHANNELS, OPUS_APPLICATION_VOIP, byref(error))
             if error.value != 0:
                 raise Exception(f"Ошибка создания кодировщика: {error.value}")
-            # Устанавливаем битрейт 64 kbps для лучшего качества
+            # Устанавливаем битрейт 24 kbps для лучшего качества
             self.opus.opus_encoder_ctl(self.encoder, OPUS_SET_BITRATE_REQUEST, BITRATE)
             # Включаем VBR (переменный битрейт)
             self.opus.opus_encoder_ctl(self.encoder, OPUS_SET_VBR_REQUEST, 1)
@@ -190,7 +195,7 @@ class VoiceClientBackend(QObject):
             return False
 
     def disconnect_from_server(self):
-        """Отключение от сервера"""
+        """Отключение от серверу"""
         self.logger.info("Начало отключения от сервера")
         self.running = False
         self.is_connected = False
@@ -267,19 +272,6 @@ class VoiceClientBackend(QObject):
         """Callback для захвата аудио"""
         try:
             if self.is_transmitting and self.is_connected:
-                # Проверяем, является ли аудио тишиной
-                is_silence = self._is_silence(in_data)
-                if is_silence:
-                    if self.silence_start_time is None:
-                        self.silence_start_time = time.time()
-                    elif time.time() - self.silence_start_time > DTX_SILENCE_DURATION:
-                        if self.dtx_enabled:
-                            # Отправляем пакет тишины
-                            silence_packet = b'\x01'
-                            self.network_queue.put(silence_packet)
-                            return (None, pyaudio.paContinue)
-                else:
-                    self.silence_start_time = None
                 # Кодируем в Opus
                 encoded = (c_ubyte * 400)()
                 # Преобразуем байты в массив int16
@@ -287,12 +279,16 @@ class VoiceClientBackend(QObject):
                 # Кодируем
                 result = self.opus.opus_encode(self.encoder, pcm_data, FRAME_SIZE, encoded, 400)
                 if result > 0:
-                    # Отправляем без sequence number
-                    self.network_queue.put(bytes(encoded[:result]))
+                    # Добавляем sequence number
+                    self.sequence_number += 1
+                    # Формируем пакет с sequence number (4 байта) + данные
+                    seq_bytes = struct.pack('>I', self.sequence_number)
+                    packet = seq_bytes + bytes(encoded[:result])
+                    self.network_queue.put(packet)
                     self.packets_sent += 1
                     # Логируем каждые 50 пакетов
                     if self.packets_sent % 50 == 0:
-                        self.logger.info(f"Отправлен аудио пакет #{self.packets_sent}, размер: {result} байт")
+                        self.logger.info(f"Отправлен аудио пакет #{self.sequence_number}, размер: {result} байт")
             return (None, pyaudio.paContinue)
         except Exception as e:
             error_msg = f"Ошибка в audio callback: {str(e)}"
@@ -311,6 +307,7 @@ class VoiceClientBackend(QObject):
         threads = [
             threading.Thread(target=self._transmit_thread, name="TransmitThread"),
             threading.Thread(target=self._receive_thread, name="ReceiveThread"),
+            threading.Thread(target=self._jitter_thread, name="JitterThread"),
             threading.Thread(target=self._playback_thread, name="PlaybackThread"),
             threading.Thread(target=self._keepalive_thread, name="KeepAliveThread"),
             threading.Thread(target=self._stats_thread, name="StatsThread"),
@@ -342,29 +339,31 @@ class VoiceClientBackend(QObject):
         self.logger.info("Поток передачи данных остановлен")
 
     def _receive_thread(self):
-        """Поток приема данных без jitter buffer"""
+        """Поток приема данных с jitter buffer"""
         self.logger.info("Поток приема данных запущен")
-        packet_counter = 0
         while self.running:
             try:
                 if self.socket:
                     try:
                         data, addr = self.socket.recvfrom(4000)
-                        packet_counter += 1
-                        self.packets_received += 1
                         # Игнорируем keep-alive пакеты
                         if len(data) <= 1:
                             continue
-                        # Декодируем сразу
-                        pcm_data = (c_int16 * FRAME_SIZE)()
-                        c_ubyte_array = (c_ubyte * len(data)).from_buffer_copy(data)
-                        result = self.opus.opus_decode(
-                            self.decoder, c_ubyte_array, len(data), pcm_data, FRAME_SIZE, 0
-                        )
-                        if result > 0:
-                            # Оставляем данные в int16 для воспроизведения
-                            audio_data = pcm_data[:result]
-                            self.audio_queue.put(audio_data)
+                        
+                        # Извлекаем sequence number
+                        if len(data) >= 4:
+                            seq_num = struct.unpack('>I', data[:4])[0]
+                            audio_data = data[4:]
+                            
+                            # Добавляем в jitter buffer
+                            with self.jitter_buffer_lock:
+                                self.jitter_buffer.append((seq_num, audio_data))
+                                
+                            self.packets_received += 1
+                            
+                            # Логируем каждые 50 пакетов
+                            if self.packets_received % 50 == 0:
+                                self.logger.info(f"Получен аудио пакет #{seq_num}, размер: {len(audio_data)} байт")
                     except socket.timeout:
                         time.sleep(0.001)
                     except BlockingIOError:
@@ -386,26 +385,100 @@ class VoiceClientBackend(QObject):
                 self.logger.error(traceback.format_exc())
         self.logger.info("Поток приема данных остановлен")
 
+    def _jitter_thread(self):
+        """Поток обработки jitter buffer"""
+        self.logger.info("Поток jitter buffer запущен")
+        
+        target_delay = JITTER_BUFFER_TARGET_SIZE  # целевое количество пакетов в буфере
+        min_delay = JITTER_BUFFER_MIN_SIZE
+        max_delay = JITTER_BUFFER_MAX_SIZE
+        
+        while self.running:
+            try:
+                with self.jitter_buffer_lock:
+                    buffer_size = len(self.jitter_buffer)
+                    
+                    # Если буфер достаточно большой, обрабатываем пакеты
+                    if buffer_size >= min_delay:
+                        # Сортируем по sequence number
+                        sorted_packets = sorted(list(self.jitter_buffer), key=lambda x: x[0])
+                        
+                        # Извлекаем самый старый пакет
+                        if sorted_packets:
+                            seq_num, audio_data = sorted_packets[0]
+                            # Удаляем из буфера
+                            self.jitter_buffer = deque([p for p in self.jitter_buffer if p[0] != seq_num], maxlen=max_delay)
+                            
+                            # Декодируем
+                            pcm_data = (c_int16 * FRAME_SIZE)()
+                            c_ubyte_array = (c_ubyte * len(audio_data)).from_buffer_copy(audio_data)
+                            result = self.opus.opus_decode(
+                                self.decoder, c_ubyte_array, len(audio_data), pcm_data, FRAME_SIZE, 0
+                            )
+                            if result > 0:
+                                # Добавляем в очередь воспроизведения
+                                audio_data_decoded = pcm_data[:result]
+                                self.audio_queue.put(audio_data_decoded)
+                    else:
+                        # Если буфер маленький, немного ждем
+                        time.sleep(0.005)  # 5ms
+                        
+            except Exception as e:
+                error_msg = f"Ошибка в jitter thread: {str(e)}"
+                self.logger.error(error_msg)
+                self.logger.error(traceback.format_exc())
+                time.sleep(0.01)
+                
+        self.logger.info("Поток jitter buffer остановлен")
+
     def _playback_thread(self):
         """Поток воспроизведения аудио с фиксированной скоростью"""
         self.logger.info("Поток воспроизведения аудио запущен")
 
         frame_duration = FRAME_SIZE / SAMPLE_RATE
         next_play_time = time.time()
+        
+        # Адаптивные параметры
+        target_queue_size = 3
+        min_queue_size = 1
+        max_queue_size = 8
+        
         while self.running:
             try:
+                current_queue_size = self.audio_queue.qsize()
+                
+                # Адаптивное управление буфером
+                if current_queue_size < min_queue_size:
+                    # Буфер слишком маленький, ждем
+                    time.sleep(0.01)
+                    continue
+                elif current_queue_size > max_queue_size:
+                    # Буфер переполнен, пропускаем старые пакеты
+                    try:
+                        self.audio_queue.get_nowait()
+                        self.logger.warning(f"Пропущен пакет из-за переполнения буфера ({current_queue_size} > {max_queue_size})")
+                        self.packets_lost += 1
+                        continue
+                    except queue.Empty:
+                        pass
+                
                 # Получаем данные из очереди
                 audio_data = self.audio_queue.get(timeout=0.1)
 
                 # Синхронизируем воспроизведение
                 current_time = time.time()
                 if current_time < next_play_time:
-                    time.sleep(next_play_time - current_time)
+                    sleep_time = next_play_time - current_time
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+                
                 # Преобразуем в байты и воспроизводим
                 audio_bytes = struct.pack(f'{len(audio_data)}h', *audio_data)
                 self.audio_stream_out.write(audio_bytes)
+                
                 # Обновляем время следующего воспроизведения
                 next_play_time += frame_duration
+                
             except queue.Empty:
                 # Воспроизводим тишину если данных нет
                 silence = [0] * FRAME_SIZE
@@ -449,11 +522,16 @@ class VoiceClientBackend(QObject):
             if self.is_connected:
                 # Вычисляем размер буфера в миллисекундах
                 buffer_size_ms = (self.audio_queue.qsize() * FRAME_SIZE / SAMPLE_RATE) * 1000
+                jitter_buffer_size = 0
+                with self.jitter_buffer_lock:
+                    jitter_buffer_size = len(self.jitter_buffer)
+                
                 # Формируем строку статистики
                 stats = (f"Статистика: Отправлено: {self.packets_sent}, "
                          f"Получено: {self.packets_received}, "
                          f"Потеряно: {self.packets_lost}, "
-                         f"Очередь: {self.audio_queue.qsize()} фреймов, "
+                         f"Jitter буфер: {jitter_buffer_size}, "
+                         f"Очередь воспроизведения: {self.audio_queue.qsize()} фреймов, "
                          f"Буфер: {buffer_size_ms:.1f}ms")
                 self.logger.info(stats)
                 self.status_update.emit(stats)
