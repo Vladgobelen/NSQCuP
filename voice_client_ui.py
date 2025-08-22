@@ -6,7 +6,8 @@ from PyQt5.QtGui import QFont, QColor, QPalette
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QListWidget, QListWidgetItem, QLineEdit, QFrame, QScrollArea, QMessageBox,
-    QTextEdit, QSplitter, QCheckBox, QSlider, QSpacerItem, QSizePolicy, QStackedWidget
+    QTextEdit, QSplitter, QCheckBox, QSlider, QSpacerItem, QSizePolicy, QStackedWidget,
+    QFormLayout, QSpinBox  # Удалены виджеты для настроек DTX
 )
 
 # Локальные импорты
@@ -26,7 +27,6 @@ class VoiceChatUI(QWidget):
         self.participants_visible = False
         self.current_style = "telegram"  # или "discord"
         self.resize_pending = False
-
         # Настройка логирования
         if not hasattr(self, 'logger_configured'):
             if not os.path.exists('logs'):
@@ -37,7 +37,6 @@ class VoiceChatUI(QWidget):
             fh.setFormatter(formatter)
             self.logger.addHandler(fh)
             self.logger_configured = True
-
         self.setup_ui()
         self.setup_theme()
 
@@ -46,26 +45,20 @@ class VoiceChatUI(QWidget):
         self.setLayout(self.main_layout)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
-
         # Создаем QStackedWidget для управления переключением между режимами
         self.stacked_container = QStackedWidget()
-
         # Создаем контейнеры для разных стилей
         self.telegram_container = QWidget()
         self.discord_container = QWidget()
-
         # Настройка интерфейсов
         self.setup_telegram_ui()
         self.setup_discord_ui()
-
         # Добавляем контейнеры в стек
         self.stacked_container.addWidget(self.telegram_container)
         self.stacked_container.addWidget(self.discord_container)
-
         # Устанавливаем текущий режим
         self.current_style = "telegram"
         self.stacked_container.setCurrentIndex(0)
-
         # Добавляем стек в основной макет
         self.main_layout.addWidget(self.stacked_container)
 
@@ -74,13 +67,10 @@ class VoiceChatUI(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self.setup_telegram_top_bar(layout)
-
         # Список участников (горизонтальный, скрываемый)
         self.setup_participants_bar(layout)
-
         # Область чата
         self.setup_chat_area(layout)
-
         # Нижняя панель с полем ввода
         self.setup_input_area(layout)
 
@@ -88,14 +78,12 @@ class VoiceChatUI(QWidget):
         layout = QHBoxLayout(self.discord_container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-
         # Левая панель (список участников и управление)
         left_panel = QWidget()
         left_panel.setFixedWidth(250)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(0)
-
         # Заголовок сервера/комнаты
         server_header = QWidget()
         server_header.setFixedHeight(50)
@@ -105,7 +93,6 @@ class VoiceChatUI(QWidget):
         server_name.setFont(QFont("Arial", 14, QFont.Bold))
         server_header_layout.addWidget(server_name)
         server_header_layout.addStretch()
-
         # Кнопка настроек (добавлена)
         self.discord_settings_btn = QPushButton("⚙")
         self.discord_settings_btn.setFixedSize(30, 30)
@@ -122,7 +109,6 @@ class VoiceChatUI(QWidget):
         """)
         self.discord_settings_btn.clicked.connect(self.show_settings)
         server_header_layout.addWidget(self.discord_settings_btn)
-
         # Кнопка назад
         back_btn = QPushButton("←")
         back_btn.setFixedSize(30, 30)
@@ -141,13 +127,11 @@ class VoiceChatUI(QWidget):
         """)
         server_header_layout.addWidget(back_btn)
         left_layout.addWidget(server_header)
-
         # Список участников (вертикальный)
         participants_label = QLabel("Участники голосового канала")
         participants_label.setContentsMargins(15, 10, 15, 5)
         participants_label.setStyleSheet("color: #72767d; font-weight: bold;")
         left_layout.addWidget(participants_label)
-
         self.discord_participants_list = QListWidget()
         self.discord_participants_list.setStyleSheet("""
             QListWidget {
@@ -168,14 +152,12 @@ class VoiceChatUI(QWidget):
             item = QListWidgetItem(f"Участник {i+1}")
             self.discord_participants_list.addItem(item)
         left_layout.addWidget(self.discord_participants_list, 1)
-
         # Панель управления голосом
         voice_control = QWidget()
         voice_control.setFixedHeight(80)
         voice_control.setStyleSheet("background-color: #292b2f;")
         voice_layout = QVBoxLayout(voice_control)
         voice_layout.setContentsMargins(10, 10, 10, 10)
-
         # Кнопка микрофона
         self.discord_mic_btn = QPushButton("Выключить микрофон")
         self.discord_mic_btn.setCheckable(True)
@@ -206,16 +188,14 @@ class VoiceChatUI(QWidget):
         self.discord_mic_btn.clicked.connect(self.toggle_microphone)
         self.discord_mic_btn.setEnabled(False)
         voice_layout.addWidget(self.discord_mic_btn)
-
         left_layout.addWidget(voice_control)
+        left_layout.addStretch()
         layout.addWidget(left_panel)
-
         # Правая панель (чат)
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
-
         # Заголовок чата
         chat_header = QWidget()
         chat_header.setFixedHeight(50)
@@ -227,7 +207,6 @@ class VoiceChatUI(QWidget):
         chat_header_layout.addWidget(chat_name)
         chat_header_layout.addStretch()
         right_layout.addWidget(chat_header)
-
         # Область чата
         self.discord_chat_area = QTextEdit()
         self.discord_chat_area.setReadOnly(True)
@@ -246,14 +225,12 @@ class VoiceChatUI(QWidget):
         self.discord_chat_area.append(
             "<span style='color: #fff; text-align: right; display: block;'><b>Вы:</b> Здравствуйте!</span>")
         right_layout.addWidget(self.discord_chat_area, 1)
-
         # Поле ввода сообщения
         input_widget = QWidget()
         input_widget.setFixedHeight(60)
         input_widget.setStyleSheet("background-color: #40444b;")
         input_layout = QHBoxLayout(input_widget)
         input_layout.setContentsMargins(15, 10, 15, 10)
-
         self.discord_message_input = QLineEdit()
         self.discord_message_input.setPlaceholderText("Введите сообщение...")
         self.discord_message_input.setStyleSheet("""
@@ -266,7 +243,6 @@ class VoiceChatUI(QWidget):
             }
         """)
         self.discord_message_input.returnPressed.connect(self.send_discord_message)
-
         self.discord_send_btn = QPushButton("➤")
         self.discord_send_btn.setFixedSize(40, 40)
         self.discord_send_btn.setStyleSheet("""
@@ -286,11 +262,9 @@ class VoiceChatUI(QWidget):
             }
         """)
         self.discord_send_btn.clicked.connect(self.send_discord_message)
-
         input_layout.addWidget(self.discord_message_input)
         input_layout.addWidget(self.discord_send_btn)
         right_layout.addWidget(input_widget)
-
         layout.addWidget(right_panel, 1)
 
     def setup_telegram_top_bar(self, layout):
@@ -298,7 +272,6 @@ class VoiceChatUI(QWidget):
         top_bar.setFixedHeight(50)
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(10, 5, 10, 5)
-
         # Кнопка назад
         self.back_btn = QPushButton("←")
         self.back_btn.setFixedSize(40, 40)
@@ -315,7 +288,6 @@ class VoiceChatUI(QWidget):
                 border-radius: 20px;
             }
         """)
-
         # Кнопка комнат
         self.rooms_btn = QPushButton("Комнаты")
         self.rooms_btn.setFixedHeight(40)
@@ -332,13 +304,11 @@ class VoiceChatUI(QWidget):
                 background-color: #2980b9;
             }
         """)
-
         # Название чата
         self.chat_title = QLabel("Голосовой чат")
         self.chat_title.setFont(QFont("Arial", 14, QFont.Bold))
         self.chat_title.setAlignment(Qt.AlignCenter)
         self.chat_title.mousePressEvent = self.toggle_participants
-
         # Кнопка настроек
         self.settings_btn = QPushButton("⚙")
         self.settings_btn.setFixedSize(40, 40)
@@ -354,14 +324,12 @@ class VoiceChatUI(QWidget):
             }
         """)
         self.settings_btn.clicked.connect(self.show_settings)
-
         # Кнопка микрофона
         self.mic_btn = QPushButton("🎤")
         self.mic_btn.setFixedSize(40, 40)
         self.mic_btn.setCheckable(True)
         self.mic_btn.setEnabled(False)
         self.mic_btn.clicked.connect(self.toggle_microphone)
-
         top_layout.addWidget(self.back_btn)
         top_layout.addWidget(self.rooms_btn)
         top_layout.addWidget(self.chat_title, 1)
@@ -370,10 +338,12 @@ class VoiceChatUI(QWidget):
         layout.addWidget(top_bar)
 
     def setup_settings_menu(self):
-        """Создает меню настроек"""
+        """Создает меню настроек БЕЗ DTX"""
         self.settings_menu = QWidget()
         self.settings_menu.setWindowTitle("Настройки голосового чата")
-        self.settings_menu.setFixedSize(350, 250)  # Уменьшена высота, так как настройки DTX удалены
+        # --- ИЗМЕНЕНО: Размер окна уменьшен, так как настройки DTX удалены ---
+        self.settings_menu.setFixedSize(350, 250)  # Уменьшена высота
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
         self.settings_menu.setWindowFlags(Qt.Dialog)
         layout = QVBoxLayout(self.settings_menu)
         layout.setContentsMargins(15, 15, 15, 15)
@@ -393,10 +363,42 @@ class VoiceChatUI(QWidget):
 
         layout.addStretch()
 
+        # Кнопки
+        buttons_layout = QHBoxLayout()
+        # Кнопка применения настроек
+        apply_btn = QPushButton("Применить")
+        apply_btn.clicked.connect(self.apply_settings)
         # Кнопка закрытия
         close_btn = QPushButton("Закрыть")
         close_btn.clicked.connect(self.settings_menu.hide)
-        layout.addWidget(close_btn)
+        buttons_layout.addWidget(apply_btn)
+        buttons_layout.addWidget(close_btn)
+        layout.addLayout(buttons_layout)
+
+    def apply_settings(self):
+        """Применяет настройки из меню настроек (БЕЗ DTX)"""
+        # --- ИЗМЕНЕНО: Удалена логика применения настроек DTX ---
+        # Получаем значения из виджетов
+        # dtx_enabled = self.dtx_enabled_checkbox.isChecked()
+        # dtx_threshold = self.dtx_threshold_spinbox.value()
+        # dtx_max_quiet = self.dtx_max_quiet_spinbox.value()
+        #
+        # # Применяем настройки к текущему клиенту
+        # if self.voice_client:
+        #     self.voice_client.dtx_enabled = dtx_enabled
+        #     self.voice_client.dtx_threshold = dtx_threshold
+        #     self.voice_client.dtx_max_quiet_frames = dtx_max_quiet
+        #     self.logger.info(f"Настройки DTX применены: включено={dtx_enabled}, порог={dtx_threshold}, макс.тихих={dtx_max_quiet}")
+        # else:
+        #     self.logger.warning("Клиент не подключен, настройки DTX не применены")
+        #
+        # # Здесь можно также сохранить настройки в файл или реестр для постоянного хранения
+        # # Например, в voice_client_constants.py или отдельный config файл
+        #
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
+        # Закрываем меню настроек
+        self.settings_menu.hide()
 
     def setup_participants_bar(self, layout):
         """Создает панель участников (горизонтальный список)"""
@@ -406,11 +408,9 @@ class VoiceChatUI(QWidget):
         participants_layout = QHBoxLayout(self.participants_widget)
         participants_layout.setContentsMargins(10, 5, 10, 5)
         participants_layout.setSpacing(10)
-
         participants_label = QLabel("Участники:")
         participants_label.setStyleSheet("font-weight: bold;")
         participants_layout.addWidget(participants_label)
-
         for i in range(3):
             participant = QLabel(f"Игрок {i+1}")
             participant.setFixedSize(50, 50)
@@ -424,7 +424,6 @@ class VoiceChatUI(QWidget):
                 }
             """)
             participants_layout.addWidget(participant)
-
         participants_layout.addStretch()
         layout.addWidget(self.participants_widget)
 
@@ -444,11 +443,9 @@ class VoiceChatUI(QWidget):
         input_widget.setFixedHeight(60)
         input_layout = QHBoxLayout(input_widget)
         input_layout.setContentsMargins(10, 5, 10, 5)
-
         self.message_input = QLineEdit()
         self.message_input.setPlaceholderText("Введите сообщение...")
         self.message_input.returnPressed.connect(self.send_message)
-
         self.send_btn = QPushButton("➤")
         self.send_btn.setFixedSize(40, 40)
         self.send_btn.setStyleSheet("""
@@ -468,7 +465,6 @@ class VoiceChatUI(QWidget):
             }
         """)
         self.send_btn.clicked.connect(self.send_message)
-
         input_layout.addWidget(self.message_input)
         input_layout.addWidget(self.send_btn)
         layout.addWidget(input_widget)
@@ -524,7 +520,6 @@ class VoiceChatUI(QWidget):
             is_checked = self.mic_btn.isChecked()
         else:
             is_checked = self.discord_mic_btn.isChecked()
-
         if is_checked:
             self.start_talking()
         else:
@@ -544,7 +539,6 @@ class VoiceChatUI(QWidget):
         # Обновляем состояние обеих кнопок независимо от стиля
         self.mic_btn.setEnabled(self.is_connected)
         self.discord_mic_btn.setEnabled(self.is_connected)
-
         if not self.is_connected:
             # Отключено от сервера - серый
             telegram_style = """
@@ -618,7 +612,6 @@ class VoiceChatUI(QWidget):
                     opacity: 0.8;
                 }
             """
-
         # Применяем стили к текущей активной кнопке
         if self.current_style == "telegram":
             self.mic_btn.setStyleSheet(telegram_style)
@@ -652,14 +645,12 @@ class VoiceChatUI(QWidget):
                 self.add_message("Система", "Подключение к серверу...", False)
             else:
                 self.discord_chat_area.append("<span style='color: #72767d;'>Подключение к серверу...</span>")
-
             # Создаем клиент
             self.voice_client = VoiceClientBackend()
             self.voice_client.status_update.connect(self.update_status)
             self.voice_client.log_message.connect(self.logger.info)
             self.voice_client.connection_update.connect(self.update_connection_status)
             self.voice_client.transmission_update.connect(self.update_transmission_status)
-
             # Подключаемся к серверу
             if self.voice_client.connect_to_server(SERVER_ADDRESS[0], SERVER_ADDRESS[1]):
                 self.is_connected = True
@@ -689,12 +680,10 @@ class VoiceChatUI(QWidget):
         # Обновляем состояние обеих кнопок независимо от стиля
         self.mic_btn.setEnabled(connected)
         self.discord_mic_btn.setEnabled(connected)
-
         if not connected:
             # Сбрасываем состояние кнопок при отключении
             self.mic_btn.setChecked(False)
             self.discord_mic_btn.setChecked(False)
-
         self.update_mic_button_style()  # Обновляем стиль для текущей активной кнопки
 
     def update_transmission_status(self, transmitting):
@@ -731,7 +720,6 @@ class VoiceChatUI(QWidget):
         palette.setColor(QPalette.Highlight, QColor(65, 130, 210))
         palette.setColor(QPalette.HighlightedText, Qt.white)
         self.setPalette(palette)
-
         self.setStyleSheet("""
             QWidget {
                 background-color: #1e1e1e;

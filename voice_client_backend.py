@@ -1,608 +1,957 @@
-from voice_client_utils import setup_backend_logging
-from voice_client_constants import *
-from PyQt5.QtCore import QObject, pyqtSignal
-from ctypes import c_ubyte, c_int32, c_int16, c_int, byref, POINTER, c_void_p, cdll
-from collections import deque, defaultdict
+import os
+import sys
 import uuid
-import math
-import ctypes
-import struct
-import queue
 import time
 import threading
+import queue
+import logging
 import socket
+import struct
 import traceback
-import platform
-import os
+import ctypes
+import ctypes.util
+from collections import defaultdict, deque
 
+import pyaudio
+
+from PyQt5.QtCore import QObject, pyqtSignal, QTimer
+
+# Импортируем константы из вашего файла
+from voice_client_constants import (
+    SAMPLE_RATE, CHANNELS, FRAME_SIZE, BUFFER_DURATION_MS,
+    KEEP_ALIVE_INTERVAL, SERVER_ADDRESS, OPUS_APPLICATION_VOIP,
+    OPUS_SIGNAL_VOICE, BITRATE, JITTER_BUFFER_MAX_SIZE,
+    JITTER_BUFFER_MIN_SIZE, JITTER_BUFFER_TARGET_SIZE,
+    PLC_MAX_SKIP_FRAMES, CLIENT_ID_LEN
+)
+
+# --- Настройки логирования для backend ---
+logger = logging.getLogger('VoiceClientBackend')
+if not logger.handlers and not os.path.exists('logs'):
+    os.makedirs('logs')
+if not logger.handlers:
+    logger.setLevel(logging.DEBUG)
+    fh = logging.FileHandler('logs/voice_backend.log')
+    fh.setLevel(logging.DEBUG)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
+    ch.setFormatter(formatter)
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+# --- Конец настроек логирования ---
+
+# Проверка доступности pyaudio
+pyaudio_available = True
 try:
     import pyaudio
-    pyaudio_available = True
 except ImportError:
-    pyaudio = None
     pyaudio_available = False
+    logger.error("PyAudio не найден. Голосовой клиент не будет работать.")
+
+# --- Загрузка и инициализация libopus с помощью ctypes ---
+opuslib = None
+opus_available = False
+
+# Определяем типы для ctypes
+opus_int32 = ctypes.c_int32
+opus_int16 = ctypes.c_int16
+opus_uint32 = ctypes.c_uint32
+opus_int8 = ctypes.c_int8
+opus_uint8 = ctypes.c_uint8
+opus_int64 = ctypes.c_int64
+opus_uint64 = ctypes.c_uint64
+# --- ИСПРАВЛЕНИЕ: добавлена недостающая строка для c_int_p ---
+c_int_p = ctypes.POINTER(ctypes.c_int)
+# --- ИСПРАВЛЕНИЕ: добавлена недостающая строка для c_short_p ---
+c_short_p = ctypes.POINTER(ctypes.c_short)
+# --- КОНЕЦ ИСПРАВЛЕНИЙ ---
+c_ubyte_p = ctypes.POINTER(ctypes.c_ubyte)
+c_uint_p = ctypes.POINTER(ctypes.c_uint)
+c_ulong_p = ctypes.POINTER(ctypes.c_ulong)
+c_ushort_p = ctypes.POINTER(ctypes.c_ushort)
+
+OPUS_OK = 0
+OPUS_BAD_ARG = -1
+OPUS_BUFFER_TOO_SMALL = -2
+OPUS_INTERNAL_ERROR = -3
+OPUS_INVALID_PACKET = -4
+OPUS_UNIMPLEMENTED = -5
+OPUS_INVALID_STATE = -6
+OPUS_ALLOC_FAIL = -7
+
+OPUS_APPLICATION_VOIP = 2048
+OPUS_APPLICATION_AUDIO = 2049
+OPUS_APPLICATION_RESTRICTED_LOWDELAY = 2051
+
+OPUS_SET_BITRATE_REQUEST = 4002
+OPUS_SET_VBR_REQUEST = 10006
+OPUS_SET_COMPLEXITY_REQUEST = 4010
+OPUS_SET_SIGNAL_REQUEST = 4024
+
+OPUS_SIGNAL_VOICE = 3001
+OPUS_SIGNAL_MUSIC = 3002
+
+MAX_PACKET_SIZE = 4000
+
+try:
+    # Попытка найти библиотеку Opus
+    opuslib_path = ctypes.util.find_library("opus")
+    if opuslib_path is None:
+        # Попробуем распространенные имена
+        for name in ['libopus', 'opus']:
+            opuslib_path = ctypes.util.find_library(name)
+            if opuslib_path:
+                break
+    if opuslib_path is None:
+        # Если не найдено, попробуем прямые пути (например, для Windows)
+        if os.name == 'nt':  # Windows
+            # Предполагаем, что opus.dll находится рядом или в PATH
+            potential_paths = ['opus.dll', 'libopus.dll', os.path.join(os.path.dirname(__file__), 'opus.dll')]
+            for path in potential_paths:
+                if os.path.exists(path):
+                    opuslib_path = path
+                    break
+        elif os.name == 'posix':  # Linux/macOS
+            # Предполагаем, что libopus.so или libopus.dylib находится рядом или в стандартных путях
+            potential_paths = ['libopus.so', 'libopus.dylib']
+            for path in potential_paths:
+                if os.path.exists(path):
+                    opuslib_path = path
+                    break
+
+    if opuslib_path:
+        opuslib = ctypes.CDLL(opuslib_path)
+        logger.info(f"libopus загружена из: {opuslib_path}")
+
+        # Определение сигнатур функций
+        # opus_encoder_create
+        opuslib.opus_encoder_create.argtypes = (opus_int32, ctypes.c_int, opus_int32, c_int_p)
+        opuslib.opus_encoder_create.restype = ctypes.c_void_p
+
+        # opus_encoder_ctl
+        # opus_encoder_ctl принимает переменное число аргументов, поэтому указываем только обязательные
+        opuslib.opus_encoder_ctl.argtypes = (ctypes.c_void_p, opus_int32)  # Остальные аргументы передаются напрямую
+        opuslib.opus_encoder_ctl.restype = opus_int32
+
+        # opus_encode
+        # --- ИСПРАВЛЕНИЕ: Используем c_short_p вместо c_ushort_p ---
+        opuslib.opus_encode.argtypes = (ctypes.c_void_p, c_short_p, ctypes.c_int, c_ubyte_p, opus_int32)
+        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+        opuslib.opus_encode.restype = opus_int32
+
+        # opus_encoder_destroy
+        opuslib.opus_encoder_destroy.argtypes = (ctypes.c_void_p,)
+        opuslib.opus_encoder_destroy.restype = None
+
+        # opus_decoder_create
+        opuslib.opus_decoder_create.argtypes = (opus_int32, ctypes.c_int, c_int_p)
+        opuslib.opus_decoder_create.restype = ctypes.c_void_p
+
+        # opus_decoder_ctl
+        # opus_decoder_ctl также принимает переменные аргументы
+        opuslib.opus_decoder_ctl.argtypes = (ctypes.c_void_p, opus_int32)  # Остальные аргументы передаются напрямую
+        opuslib.opus_decoder_ctl.restype = opus_int32
+
+        # opus_decode
+        # --- ИСПРАВЛЕНИЕ: Используем c_short_p вместо c_ushort_p для выходного буфера ---
+        opuslib.opus_decode.argtypes = (ctypes.c_void_p, c_ubyte_p, opus_int32, c_short_p, ctypes.c_int, ctypes.c_int)
+        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+        opuslib.opus_decode.restype = opus_int32
+
+        # opus_decoder_destroy
+        opuslib.opus_decoder_destroy.argtypes = (ctypes.c_void_p,)
+        opuslib.opus_decoder_destroy.restype = None
+
+        # opus_strerror
+        opuslib.opus_strerror.argtypes = (ctypes.c_int,)
+        opuslib.opus_strerror.restype = ctypes.c_char_p
+
+        opus_available = True
+    else:
+        logger.error("libopus не найдена. Голосовой клиент не будет работать.")
+except Exception as e:
+    logger.error(f"Ошибка загрузки libopus: {e}")
+    traceback.print_exc()
+
+
+def opus_strerror(error_code):
+    """Получает строковое описание ошибки Opus."""
+    if opuslib and hasattr(opuslib, 'opus_strerror'):
+        return opuslib.opus_strerror(error_code).decode('utf-8')
+    else:
+        return f"Opus error code: {error_code}"
+
+
+class OpusEncoder:
+    """Простая обертка над Opus C API для энкодера."""
+
+    def __init__(self, fs, channels, application):
+        self.fs = fs
+        self.channels = channels
+        self.application = application
+        self.encoder_state = None
+        self._create_encoder()
+
+    def _create_encoder(self):
+        if not opus_available or not opuslib:
+            raise RuntimeError("libopus недоступна")
+
+        err = ctypes.c_int()
+        self.encoder_state = opuslib.opus_encoder_create(self.fs, self.channels, self.application, ctypes.byref(err))
+        if err.value != OPUS_OK or not self.encoder_state:
+            raise RuntimeError(f"Не удалось создать Opus энкодер: {opus_strerror(err.value)}")
+
+        # Установка параметров (если нужно)
+        # err = opuslib.opus_encoder_ctl(self.encoder_state, OPUS_SET_SIGNAL_REQUEST, OPUS_SIGNAL_VOICE)
+        # if err.value != OPUS_OK:
+        #     logger.warning(f"Не удалось установить OPUS_SIGNAL_VOICE: {opus_strerror(err.value)}")
+
+        # err = opuslib.opus_encoder_ctl(self.encoder_state, OPUS_SET_BITRATE_REQUEST, BITRATE)
+        # if err.value != OPUS_OK:
+        #     logger.warning(f"Не удалось установить битрейт {BITRATE}: {opus_strerror(err.value)}")
+
+    def encode(self, pcm_data, frame_size):
+        """Кодирует PCM данные в Opus пакет."""
+        if not self.encoder_state:
+            raise RuntimeError("Энкодер не инициализирован")
+
+        # --- ИСПРАВЛЕНИЕ: Создание массива c_short ---
+        # Преобразуем байты PCM в массив c_short (знаковые 16-битные)
+        # from_buffer_copy работает корректно с c_short для данных PyAudio paInt16
+        pcm_array = (ctypes.c_short * (len(pcm_data) // 2)).from_buffer_copy(pcm_data)
+        opus_data = (ctypes.c_ubyte * MAX_PACKET_SIZE)()
+
+        # --- ИСПРАВЛЕНИЕ: Передача pcm_array (который автоматически преобразуется в c_short_p) ---
+        result = opuslib.opus_encode(self.encoder_state, pcm_array, frame_size, opus_data, MAX_PACKET_SIZE)
+        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
+        if result < 0:
+            raise RuntimeError(f"Ошибка кодирования Opus: {opus_strerror(result)}")
+
+        # Возвращаем байты
+        return bytes(opus_data[:result])
+
+    def __del__(self):
+        if self.encoder_state and opuslib and hasattr(opuslib, 'opus_encoder_destroy'):
+            opuslib.opus_encoder_destroy(self.encoder_state)
+            self.encoder_state = None
+
+
+class OpusDecoder:
+    """Простая обертка над Opus C API для декодера."""
+
+    def __init__(self, fs, channels):
+        self.fs = fs
+        self.channels = channels
+        self.decoder_state = None
+        self._create_decoder()
+
+    def _create_decoder(self):
+        if not opus_available or not opuslib:
+            raise RuntimeError("libopus недоступна")
+
+        err = ctypes.c_int()
+        self.decoder_state = opuslib.opus_decoder_create(self.fs, self.channels, ctypes.byref(err))
+        if err.value != OPUS_OK or not self.decoder_state:
+            raise RuntimeError(f"Не удалось создать Opus декодер: {opus_strerror(err.value)}")
+
+    def decode(self, data, frame_size):
+        """
+        Декодирует Opus пакет в PCM данные.
+        :param  Байты Opus данных или None для PLC.
+        :param frame_size: Размер фрейма в сэмплах.
+        :return: Байты PCM данных.
+        """
+        if not self.decoder_state:
+            raise RuntimeError("Декодер не инициализирован")
+
+        # --- ИСПРАВЛЕНИЕ: Создание выходного буфера как массива c_short ---
+        # Opus декодирует в знаковые 16-битные целые. PyAudio paInt16 ожидает их же.
+        pcm_data = (ctypes.c_short * (frame_size * self.channels))()
+        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+        opus_data = None
+        data_len = 0
+
+        if data is not None:
+            # Убедимся, что data - это bytes
+            if isinstance(data, bytearray):
+                data = bytes(data)
+            opus_data = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
+            data_len = len(data)
+
+        # data может быть None для PLC, тогда opus_data будет None, data_len = 0
+        # --- ИСПРАВЛЕНИЕ: Передача pcm_data (который автоматически преобразуется в c_short_p) ---
+        result = opuslib.opus_decode(self.decoder_state, opus_data, data_len, pcm_data, frame_size, 0)
+        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
+        if result < 0:
+            raise RuntimeError(f"Ошибка декодирования Opus: {opus_strerror(result)}")
+
+        # Возвращаем байты
+        # result содержит количество декодированных сэмплов (не байтов!)
+        decoded_samples = result * self.channels
+        # --- ИСПРАВЛЕНИЕ: Преобразование c_short массива в байты ---
+        # from_buffer_copy создает копию из объекта ctypes, здесь мы создаем байты напрямую
+        # bytes(pcm_data) не работает, нужно использовать другой способ
+        # Можно использовать array.array или struct.pack, но самый прямой способ с ctypes:
+        # ctypes.string_at(pcm_data, decoded_samples * ctypes.sizeof(ctypes.c_short)) - работает, но возвращает bytes
+        # Но проще преобразовать в bytes через memoryview или array
+        import array
+        # Создаем array.array('h') из ctypes массива
+        # array.array('h', pcm_data[:decoded_samples]) - не работает напрямую
+        # Но можно создать array из bytes и затем скопировать
+        # Или использовать memoryview
+        # memoryview(pcm_data).cast('h')[:decoded_samples].tobytes() - не работает напрямую
+        # Лучший способ: преобразовать в bytes через bytes(pcm_data.raw[:decoded_samples * 2])
+        # Но правильнее через array или struct
+        # array.array('h') и затем .tobytes()
+        # temp_array = array.array('h')
+        # temp_array.frombytes(ctypes.string_at(pcm_data, decoded_samples * 2))
+        # return temp_array.tobytes()
+        # Еще проще:
+        return ctypes.string_at(pcm_data, decoded_samples * ctypes.sizeof(ctypes.c_short))
+        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
+    def __del__(self):
+        if self.decoder_state and opuslib and hasattr(opuslib, 'opus_decoder_destroy'):
+            opuslib.opus_decoder_destroy(self.decoder_state)
+            self.decoder_state = None
+
+# --- Конец интеграции с libopus ---
 
 
 class VoiceClientBackend(QObject):
-    status_update = pyqtSignal(str)
-    log_message = pyqtSignal(str)
-    connection_update = pyqtSignal(bool)
-    transmission_update = pyqtSignal(bool)
+    """
+    Backend для голосового клиента, поддерживающего групповые вызовы.
+    Обрабатывает захват, кодирование, отправку, получение, декодирование,
+    смешивание и воспроизведение аудио для множества участников.
+    """
+    # Сигналы для взаимодействия с UI
+    status_update = pyqtSignal(str)  # Статусное сообщение (например, "Подключение...")
+    log_message = pyqtSignal(str)    # Лог-сообщение
+    connection_update = pyqtSignal(bool)  # Состояние подключения (True/False)
+    transmission_update = pyqtSignal(bool)  # Состояние передачи (True/False)
 
     def __init__(self):
         super().__init__()
-        self.client_id = uuid.uuid4()  # Генерация уникального ID клиента
-        self.client_id_bytes = self.client_id.bytes  # Байтовое представление для отправки
-        self.logger = setup_backend_logging()
-        self.logger.info(f"[CLIENT] Generated Client ID: {self.client_id}")
+        if not pyaudio_available:
+            raise RuntimeError("PyAudio недоступен")
+        if not opus_available:
+            raise RuntimeError("libopus недоступна")
 
-        self.is_transmitting = False
-        self.is_connected = False
-        self.running = False
+        self.client_id = uuid.uuid4()
+        self.client_id_bytes = self.client_id.bytes
+        logger.info(f"Инициализация клиента с ID: {self.client_id}")
 
-        # Аудио буферы
-        self.playback_buffer = deque(maxlen=SAMPLE_RATE * BUFFER_DURATION_MS // 1000)
-        self.audio_queue = queue.Queue()
-
-        self.source_buffers = defaultdict(lambda: deque(maxlen=JITTER_BUFFER_MAX_SIZE))
-        self.last_activity = {}  # Время последней активности для каждого источника (UUID)
-        self.last_sequence_number = {}  # Последний обработанный sequence number для каждого источника (UUID)
-        self.jitter_buffer_lock = threading.Lock()
-
-        # Сеть
+        self.server_ip = None
+        self.server_port = None
         self.socket = None
-        self.server_address = None
 
-        # Очереди для межпоточного обмена
-        self.network_queue = queue.Queue()
+        # --- Аудио параметры ---
+        self.sample_rate = SAMPLE_RATE
+        self.channels = CHANNELS
+        self.frame_size = FRAME_SIZE  # Количество сэмплов на фрейм
+        self.opus_frame_bytes = self.frame_size * self.channels * 2  # 16-bit
 
-        # Аудио потоки
-        self.audio_stream_in = None
-        self.audio_stream_out = None
-        self.pyaudio_instance = None
+        # --- Состояния ---
+        self.is_connected = False
+        self.is_transmitting = False
+        self._stop_event = threading.Event()
+        self._transmit_event = threading.Event()
 
-        # Статистика
-        self.packets_sent = 0
-        self.packets_received = 0
-        self.packets_lost = 0
-        self.packets_skipped = 0
-        self.duplicate_packets = 0  # Счетчик дубликатов
-        self.last_stat_time = time.time()
+        # --- Потоки ---
+        self.send_thread = None
+        self.receive_thread = None
+        self.playback_thread = None
+        self.keepalive_timer = None
+
+        # --- PyAudio ---
+        self.pyaudio_instance = pyaudio.PyAudio()
+        self.input_stream = None
+        self.output_stream = None
+
+        # --- Opus ---
+        # Кодировщик для исходящего потока
+        self.opus_encoder = OpusEncoder(self.sample_rate, self.channels, OPUS_APPLICATION_VOIP)
+        # Можно попробовать установить параметры после создания, если нужно
+        # try:
+        #     # Пример установки сигнала (если поддерживается)
+        #     # err = opuslib.opus_encoder_ctl(self.opus_encoder.encoder_state, OPUS_SET_SIGNAL_REQUEST, OPUS_SIGNAL_VOICE)
+        #     # if err != OPUS_OK: logger.warning(...)
+        # except: pass # Игнорируем ошибки установки
+
+        # Словарь декодеров для входящих потоков {sender_uuid: decoder}
+        self.opus_decoders = {}
+        # Словарь буферов джиттера для входящих потоков {sender_uuid: JitterBuffer}
+        self.jitter_buffers = {}
+
+        # --- Счетчики ---
         self.sequence_number = 0
-        self.last_received_seq = 0
 
-        # Потоки
-        self.threads = []
+        # --- Очереди и буферы ---
+        # Очередь для отправки пакетов (из capture/send в send_thread)
+        self.send_queue = queue.Queue(maxsize=100)
+        # Очередь для воспроизведения смешанного аудио (из receive/playback в playback_thread)
+        self.playback_queue = queue.Queue(maxsize=JITTER_BUFFER_MAX_SIZE * 2)
 
-        # Opus
-        self.opus = None
-        self.encoder = None
-        self.decoder = None
+        # --- Таймеры и мьютексы ---
+        # Для безопасного доступа к словарям декодеров/буферов
+        self.receivers_lock = threading.RLock()
 
-        # Для компенсации потерь пакетов
-        self.last_audio_frame = None
-        self.skip_frames_count = 0
+        # --- Таймауты получателей ---
+        self.receiver_last_activity = defaultdict(float)  # {uuid: timestamp}
+        self.receiver_timeout = 60.0  # секунд
 
-        # Инициализация Opus
-        self._init_opus()
+    def connect_to_server(self, ip, port):
+        """Подключается к серверу и запускает потоки."""
+        if self.is_connected:
+            logger.warning("Клиент уже подключен")
+            return True
 
-    def _init_opus(self):
-        """Инициализация библиотеки Opus с оптимизацией для голоса"""
         try:
-            if platform.system() == 'Windows':
-                lib_path = 'libopus.dll'
-            else:
-                lib_path = './libopus.so.0.10.1'
-            self.opus = cdll.LoadLibrary(lib_path)
-            self.logger.info(f"Opus библиотека загружена: {lib_path}")
-
-            # Определяем прототипы функций
-            self.opus.opus_encoder_create.restype = c_void_p
-            self.opus.opus_encoder_create.argtypes = [c_int32, c_int, c_int, POINTER(c_int)]
-            self.opus.opus_decoder_create.restype = c_void_p
-            self.opus.opus_decoder_create.argtypes = [c_int32, c_int, POINTER(c_int)]
-            self.opus.opus_encode.restype = c_int
-            self.opus.opus_encode.argtypes = [c_void_p, POINTER(c_int16), c_int, POINTER(c_ubyte), c_int32]
-            self.opus.opus_decode.restype = c_int
-            self.opus.opus_decode.argtypes = [c_void_p, POINTER(c_ubyte), c_int32, POINTER(c_int16), c_int, c_int]
-
-            # Добавляем прототип для управления параметрами кодера
-            self.opus.opus_encoder_ctl.restype = c_int
-            self.opus.opus_encoder_ctl.argtypes = [c_void_p, c_int, c_int]
-
-            # Создаем кодировщик с оптимизацией для VOIP
-            error = c_int(0)
-            self.encoder = self.opus.opus_encoder_create(SAMPLE_RATE, CHANNELS, OPUS_APPLICATION_VOIP, byref(error))
-            if error.value != 0:
-                raise Exception(f"Ошибка создания кодировщика: {error.value}")
-
-            # Устанавливаем битрейт 24 kbps для лучшего качества
-            self.opus.opus_encoder_ctl(self.encoder, OPUS_SET_BITRATE_REQUEST, BITRATE)
-            # Включаем VBR (переменный битрейт)
-            self.opus.opus_encoder_ctl(self.encoder, OPUS_SET_VBR_REQUEST, 1)
-            # Устанавливаем сложность кодирования (5 - средняя)
-            self.opus.opus_encoder_ctl(self.encoder, OPUS_SET_COMPLEXITY_REQUEST, 5)
-            # Указываем, что кодируем голос
-            self.opus.opus_encoder_ctl(self.encoder, OPUS_SET_SIGNAL_REQUEST, OPUS_SIGNAL_VOICE)
-            # Включение DTX удалено
-            # self.set_dtx(self.use_dtx)
-
-            # Создаем декодер
-            error = c_int(0)
-            self.decoder = self.opus.opus_decoder_create(SAMPLE_RATE, CHANNELS, byref(error))
-            if error.value != 0:
-                raise Exception(f"Ошибка создания декодера: {error.value}")
-
-            self.logger.info(f"Opus кодек инициализирован для VOIP с битрейтом {BITRATE} bps")
-        except Exception as e:
-            error_msg = f"Ошибка инициализации Opus: {str(e)}"
-            self.logger.error(error_msg)
-            self.opus = None
-
-    def connect_to_server(self, server_ip, server_port):
-        """Подключение к серверу"""
-        try:
-            if not self.opus:
-                raise Exception("Opus не инициализирован")
-            if not pyaudio_available:
-                raise Exception("PyAudio не доступен")
-
-            self.server_address = (server_ip, server_port)
+            self.server_ip = ip
+            self.server_port = port
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket.settimeout(0.001)  # Таймаут 1 мс для неблокирующего режима
-            # Явно bind на случайный порт
-            self.socket.bind(('0.0.0.0', 0))
-            self.logger.info(f"Сокет bound на {self.socket.getsockname()}")
-            self.logger.info(f"Попытка подключения к серверу {server_ip}:{server_port}")
+            self.socket.settimeout(0.1)  # Неблокирующий с таймаутом
 
-            # --- НОВОЕ: Отправка пакета регистрации ---
-            register_packet = b'REGISTER:' + self.client_id_bytes
-            self.socket.sendto(register_packet, self.server_address)
-            self.logger.info(f"[CLIENT] Sent registration packet for ID {self.client_id}")
-            # --- КОНЕЦ НОВОГО ---
+            # Регистрация на сервере
+            reg_packet = b"REGISTER:" + self.client_id_bytes
+            self.socket.sendto(reg_packet, (self.server_ip, self.server_port))
+            logger.info(f"Отправлен регистрационный пакет на {self.server_ip}:{self.server_port}")
 
-            self.is_connected = True
-            self.running = True
-
-            # Запускаем потоки
+            # Запуск потоков
             self._start_threads()
 
+            self.is_connected = True
             self.connection_update.emit(True)
-            self.status_update.emit("Подключено к серверу")
-            self.logger.info("Успешно подключено к серверу")
+            self.status_update.emit("Подключен к серверу")
+            self.log_message.emit(f"Успешно подключен к {self.server_ip}:{self.server_port}")
+            logger.info(f"Клиент {self.client_id} подключен к {self.server_ip}:{self.server_port}")
+
+            # Запуск keep-alive таймера
+            self._start_keepalive()
+
             return True
         except Exception as e:
-            error_msg = f"Ошибка подключения: {str(e)}"
-            self.logger.error(error_msg)
-            self.logger.error(traceback.format_exc())
-            self.connection_update.emit(False)
+            logger.error(f"Ошибка подключения: {e}")
+            self.log_message.emit(f"Ошибка подключения: {e}")
+            self.status_update.emit("Ошибка подключения")
+            self._cleanup_on_disconnect()
             return False
 
     def disconnect_from_server(self):
-        """Отключение от серверу"""
-        self.logger.info("Начало отключения от сервера")
-        self.running = False
-        self.is_connected = False
+        """Отключается от сервера и останавливает потоки."""
+        if not self.is_connected:
+            return
 
-        # Останавливаем аудио потоки
-        self._stop_audio_streams()
+        logger.info("Отключение клиента...")
+        self.status_update.emit("Отключение...")
+        self.log_message.emit("Отключение от сервера")
 
-        # Останавливаем все потоки
-        for thread in self.threads:
-            if thread.is_alive():
-                thread.join(timeout=1.0)
-        self.threads = []
+        # Остановка передачи
+        self.set_transmitting(False)
 
+        # Остановка потоков
+        self._stop_event.set()
+
+        # Ожидание завершения потоков
+        threads_to_join = [self.send_thread, self.receive_thread, self.playback_thread]
+        for thread in threads_to_join:
+            if thread and thread.is_alive():
+                thread.join(timeout=2.0)  # Таймаут 2 секунды
+                if thread.is_alive():
+                    logger.warning(f"Поток {thread.name} не завершился вовремя")
+
+        # Остановка keep-alive таймера
+        if self.keepalive_timer:
+            self.keepalive_timer.stop()
+            self.keepalive_timer = None
+
+        # Закрытие сокета
         if self.socket:
-            self.socket.close()
+            try:
+                self.socket.close()
+            except Exception as e:
+                logger.error(f"Ошибка закрытия сокета: {e}")
             self.socket = None
 
+        # Очистка ресурсов PyAudio/Opus
+        self._cleanup_audio_resources()
+
+        self.is_connected = False
         self.connection_update.emit(False)
-        self.status_update.emit("Отключено от сервера")
-        self.logger.info("Успешно отключено от сервера")
+        self.status_update.emit("Отключено")
+        self.log_message.emit("Отключено от сервера")
+        logger.info("Клиент отключен")
 
     def set_transmitting(self, transmitting):
-        """Установка режима передачи"""
-        self.is_transmitting = transmitting
-        self.transmission_update.emit(transmitting)
-        self.logger.info(f"Режим передачи: {transmitting}")
+        """Включает или выключает передачу аудио."""
+        if not self.is_connected:
+            logger.warning("Невозможно установить передачу: клиент не подключен")
+            return
 
-    def _init_audio(self):
-        """Инициализация аудио"""
-        if not pyaudio_available:
-            return False
-        try:
-            self.pyaudio_instance = pyaudio.PyAudio()
-            # Настройка аудио захвата
-            self.audio_stream_in = self.pyaudio_instance.open(
-                format=pyaudio.paInt16,
-                channels=CHANNELS,
-                rate=SAMPLE_RATE,
-                input=True,
-                frames_per_buffer=FRAME_SIZE,
-                stream_callback=self._audio_callback
-            )
-            # Настройка аудио воспроизведения
-            self.audio_stream_out = self.pyaudio_instance.open(
-                format=pyaudio.paInt16,
-                channels=CHANNELS,
-                rate=SAMPLE_RATE,
-                output=True,
-                frames_per_buffer=FRAME_SIZE
-            )
-            self.logger.info("Аудио потоки успешно инициализированны")
-            return True
-        except Exception as e:
-            error_msg = f"Ошибка инициализации аудио: {str(e)}"
-            self.logger.error(error_msg)
-            self.logger.error(traceback.format_exc())
-            return False
+        if transmitting and not self.is_transmitting:
+            logger.info("Начало передачи")
+            self.is_transmitting = True
+            self._transmit_event.set()
+            self.transmission_update.emit(True)
+            self.log_message.emit("Начало передачи голоса")
 
-    def _stop_audio_streams(self):
-        """Остановка аудио потоков"""
-        try:
-            if self.audio_stream_in and self.audio_stream_in.is_active():
-                self.audio_stream_in.stop_stream()
-                self.audio_stream_in.close()
-            if self.audio_stream_out and self.audio_stream_out.is_active():
-                self.audio_stream_out.stop_stream()
-                self.audio_stream_out.close()
-            if self.pyaudio_instance:
-                self.pyaudio_instance.terminate()
-                self.pyaudio_instance = None
-            self.logger.info("Аудио потоки остановлены")
-        except Exception as e:
-            error_msg = f"Ошибка остановки аудио: {str(e)}"
-            self.logger.error(error_msg)
-            self.logger.error(traceback.format_exc())
-
-    def _audio_callback(self, in_data, frame_count, time_info, status):
-        """Callback для захвата аудио"""
-        try:
-            if self.is_transmitting and self.is_connected:
-                # Кодируем в Opus
-                encoded = (c_ubyte * 400)()
-                pcm_data = (c_int16 * FRAME_SIZE).from_buffer_copy(in_data)
-                result = self.opus.opus_encode(self.encoder, pcm_data, FRAME_SIZE, encoded, 400)
-                if result > 0:
-                    # Добавляем sequence number
-                    self.sequence_number += 1
-                    seq_bytes = struct.pack('>I', self.sequence_number)
-
-                    # Формируем пакет: [CLIENT_ID][SEQUENCE_NUMBER][OPUS_DATA]
-                    packet = self.client_id_bytes + seq_bytes + bytes(encoded[:result])
-
-                    self.network_queue.put(packet)
-                    self.packets_sent += 1
-                    # Логируем каждые 50 пакетов
-                    if self.packets_sent % 50 == 0:
-                        self.logger.info(f"Отправлен аудио пакет #{self.sequence_number}, размер: {result} байт")
-            return (None, pyaudio.paContinue)
-        except Exception as e:
-            error_msg = f"Ошибка в audio callback: {str(e)}"
-            self.logger.error(error_msg)
-            self.logger.error(traceback.format_exc())
-            return (None, pyaudio.paContinue)
+        elif not transmitting and self.is_transmitting:
+            logger.info("Окончание передачи")
+            self.is_transmitting = False
+            self._transmit_event.clear()
+            self.transmission_update.emit(False)
+            self.log_message.emit("Окончание передачи голоса")
 
     def _start_threads(self):
-        """Запуск рабочих потоков"""
-        # Инициализируем аудио
-        if not self._init_audio():
-            error_msg = "Не удалось инициализировать аудио"
-            self.logger.error(error_msg)
-            return False
+        """Запускает рабочие потоки."""
+        self._stop_event.clear()
+        self.send_thread = threading.Thread(target=self._send_worker, name="SendThread", daemon=True)
+        self.receive_thread = threading.Thread(target=self._receive_worker, name="ReceiveThread", daemon=True)
+        self.playback_thread = threading.Thread(target=self._playback_worker, name="PlaybackThread", daemon=True)
 
-        # Запускаем потоки
-        threads = [
-            threading.Thread(target=self._transmit_thread, name="TransmitThread"),
-            threading.Thread(target=self._receive_thread, name="ReceiveThread"),
-            threading.Thread(target=self._jitter_thread, name="JitterThread"),
-            threading.Thread(target=self._playback_thread, name="PlaybackThread"),
-            threading.Thread(target=self._keepalive_thread, name="KeepAliveThread"),
-            threading.Thread(target=self._stats_thread, name="StatsThread"),
-        ]
-        for thread in threads:
-            thread.daemon = True
-            thread.start()
-            self.threads.append(thread)
-            self.logger.info(f"Запущен поток: {thread.name}")
-        return True
+        self.send_thread.start()
+        self.receive_thread.start()
+        self.playback_thread.start()
 
-    def _transmit_thread(self):
-        """Поток передачи данных"""
-        self.logger.info("Поток передачи данных запущен")
-        while self.running:
+    def _start_keepalive(self):
+        """Запускает таймер для отправки keep-alive пакетов."""
+        # Используем QTimer из PyQt для корректной работы с событиями
+        self.keepalive_timer = QTimer()
+        self.keepalive_timer.timeout.connect(self._send_keepalive)
+        self.keepalive_timer.start(int(KEEP_ALIVE_INTERVAL * 1000))  # в миллисекундах
+
+    def _send_keepalive(self):
+        """Отправляет короткий keep-alive пакет."""
+        if self.is_connected and self.socket:
             try:
-                data = self.network_queue.get(timeout=0.1)
-                if self.socket and self.is_connected:
+                # Отправляем 1 байт, чтобы сервер знал, что клиент активен
+                # Сервер уже обрабатывает пакеты <= 1 байта как keep-alive
+                self.socket.sendto(b'\x00', (self.server_ip, self.server_port))
+                # logger.debug("Keep-alive пакет отправлен")
+            except Exception as e:
+                logger.error(f"Ошибка отправки keep-alive: {e}")
+
+    def _cleanup_audio_resources(self):
+        """Очищает ресурсы PyAudio и Opus."""
+        # Остановка и закрытие потоков PyAudio
+        streams_to_close = [self.input_stream, self.output_stream]
+        for stream in streams_to_close:
+            if stream and stream.is_active():
+                try:
+                    stream.stop_stream()
+                except Exception as e:
+                    logger.error(f"Ошибка остановки потока PyAudio: {e}")
+            if stream:
+                try:
+                    stream.close()
+                except Exception as e:
+                    logger.error(f"Ошибка закрытия потока PyAudio: {e}")
+
+        self.input_stream = None
+        self.output_stream = None
+
+        # Удаление декодеров Opus
+        with self.receivers_lock:
+            # Деконструкторы OpusDecoder/__del__ должны освободить ресурсы
+            self.opus_decoders.clear()
+            self.jitter_buffers.clear()
+            self.receiver_last_activity.clear()
+
+        # PyAudio instance не закрываем, так как он может использоваться другими частями
+
+    def _cleanup_on_disconnect(self):
+        """Очищает состояние при неудачном подключении или отключении."""
+        self.is_connected = False
+        self.is_transmitting = False
+        self._stop_event.set()
+        self._transmit_event.clear()
+        if self.socket:
+            try:
+                self.socket.close()
+            except:
+                pass
+            self.socket = None
+        self._cleanup_audio_resources()
+
+    def _send_worker(self):
+        """Поток для захвата аудио, кодирования и отправки пакетов."""
+        logger.info("Поток отправки запущен")
+        try:
+            # Инициализация входного потока PyAudio
+            self.input_stream = self.pyaudio_instance.open(
+                format=pyaudio.paInt16,
+                channels=self.channels,
+                rate=self.sample_rate,
+                input=True,
+                frames_per_buffer=self.frame_size,
+                # device_index=... # Можно указать конкретное устройство
+            )
+            logger.debug("Входной поток PyAudio открыт")
+
+            while not self._stop_event.is_set():
+                if self.is_transmitting and self._transmit_event.is_set():
                     try:
-                        self.socket.sendto(data, self.server_address)
+                        # Захват аудио фрейма
+                        raw_audio_data = self.input_stream.read(self.frame_size, exception_on_overflow=False)
+
+                        # Кодирование с помощью Opus
+                        encoded_data = self.opus_encoder.encode(raw_audio_data, self.frame_size)
+
+                        # Увеличение номера последовательности
+                        self.sequence_number = (self.sequence_number + 1) & 0xFFFFFFFF
+
+                        # Формирование пакета: ClientID + SeqNum + OpusData
+                        seq_bytes = struct.pack('>I', self.sequence_number)  # Big-endian
+                        packet = self.client_id_bytes + seq_bytes + encoded_data
+
+                        # Отправка пакета
+                        if self.socket:
+                            self.socket.sendto(packet, (self.server_ip, self.server_port))
+                            # logger.debug(f"Отправлен пакет #{self.sequence_number}, размер: {len(packet)} байт")
+
                     except Exception as e:
-                        self.logger.error(f"Ошибка отправки пакета: {str(e)}")
-            except queue.Empty:
-                continue
-            except Exception as e:
-                error_msg = f"Ошибка передачи: {str(e)}"
-                self.logger.error(error_msg)
-                self.logger.error(traceback.format_exc())
-        self.logger.info("Поток передачи данных остановлен")
+                        logger.error(f"Ошибка в потоке отправки (захват/кодирование/отправка): {e}")
+                        # traceback.print_exc()
+                        time.sleep(0.001)  # Небольшая пауза при ошибке
+                else:
+                    # Если не передаем, просто ждем
+                    time.sleep(0.001)  # 1 мс
 
-    def _receive_thread(self):
-        """Поток приема данных с jitter buffer"""
-        self.logger.info("Поток приема данных запущен")
-        min_packet_size = CLIENT_ID_LEN + 4
-        while self.running:
-            try:
-                if self.socket:
-                    try:
-                        data, addr = self.socket.recvfrom(4000)
+        except Exception as e:
+            logger.error(f"Критическая ошибка в потоке отправки: {e}")
+            # traceback.print_exc()
+        finally:
+            logger.info("Поток отправки завершен")
 
-                        # Игнорируем короткие пакеты (keep-alive или служебные)
-                        if len(data) < min_packet_size:
-                            continue
-
-                        # Извлекаем ID отправителя
-                        sender_id_bytes = data[:CLIENT_ID_LEN]
-                        try:
-                            sender_id = str(uuid.UUID(bytes=sender_id_bytes))
-                        except ValueError:
-                            self.logger.warning(f"Received packet with invalid UUID from {addr}")
-                            continue
-
-                        # Извлекаем sequence number и аудио данные
-                        seq_and_audio_data = data[CLIENT_ID_LEN:]
-
-                        if len(seq_and_audio_data) < 4:
-                            self.logger.warning(f"Received packet with valid UUID but insufficient data from {addr}")
-                            continue
-
-                        seq_num = struct.unpack('>I', seq_and_audio_data[:4])[0]
-                        audio_data = seq_and_audio_data[4:]
-
-                        # Используем UUID как идентификатор источника
-                        source_id = sender_id
-
-                        # Проверка на дубликаты пакетов
-                        with self.jitter_buffer_lock:
-                            # Инициализируем последний sequence number для источника, если его нет
-                            if source_id not in self.last_sequence_number:
-                                self.last_sequence_number[source_id] = -1
-                            # Проверяем, не является ли пакет дубликатом
-                            if seq_num <= self.last_sequence_number[source_id]:
-                                self.duplicate_packets += 1
-                                self.logger.debug(f"Дубликат пакета #{seq_num} от {source_id} проигнорирован")
-                                continue
-                            # Обновляем время активности источника
-                            self.last_activity[source_id] = time.time()
-                            # Добавляем в jitter buffer
-                            self.source_buffers[source_id].append((seq_num, audio_data))
-                            # Обновляем последний обработанный sequence number
-                            self.last_sequence_number[source_id] = seq_num
-
-                        self.packets_received += 1
-                        # Логируем каждые 50 пакетов
-                        if self.packets_received % 50 == 0:
-                            self.logger.info(f"Получен аудио пакет #{seq_num} от {source_id} (originally from {addr}), размер: {len(audio_data)} байт")
-
-                    except socket.timeout:
-                        time.sleep(0.005)  # Увеличенная задержка для снижения нагрузки
-                    except BlockingIOError:
-                        time.sleep(0.005)  # Увеличенная задержка для снижения нагрузки
-                    except ConnectionResetError as e:
-                        error_msg = f"Соединение разорвано сервером: {str(e)}"
-                        self.logger.error(error_msg)
-                        self.running = False
-                        self.is_connected = False
-                        self.connection_update.emit(False)
-                        self.status_update.emit("Соединение разорвано сервером")
-                    except Exception as e:
-                        error_msg = f"Ошибка приема: {str(e)}"
-                        self.logger.error(error_msg)
-                        self.logger.error(traceback.format_exc())
-            except Exception as e:
-                error_msg = f"Критическая ошибка в потоке приема: {str(e)}"
-                self.logger.error(error_msg)
-                self.logger.error(traceback.format_exc())
-        self.logger.info("Поток приема данных остановлен")
-
-    def _jitter_thread(self):
-        """Поток обработки jitter buffer с поддержкой нескольких источников"""
-        self.logger.info("Поток jitter buffer запущен")
-        target_delay = JITTER_BUFFER_TARGET_SIZE  # целевое количество пакетов в буфере
-        min_delay = JITTER_BUFFER_MIN_SIZE
-        max_delay = JITTER_BUFFER_MAX_SIZE
-        # Период очистки неактивных источников
-        last_cleanup = time.time()
-
-        while self.running:
-            try:
-                # Очищаем буферы неактивных источников
-                current_time = time.time()
-                if current_time - last_cleanup > 5.0:  # каждые 5 секунд
-                    inactive_sources = [
-                        source_id for source_id, last_time in self.last_activity.items()
-                        if current_time - last_time > 10.0  # неактивен 10 секунд
-                    ]
-                    for source_id in inactive_sources:
-                        if source_id in self.source_buffers:
-                            del self.source_buffers[source_id]
-                        if source_id in self.last_activity:
-                            del self.last_activity[source_id]
-                        if source_id in self.last_sequence_number:
-                            del self.last_sequence_number[source_id]
-                    last_cleanup = current_time
-
-                # Определяем активных спикеров (говорили в последние 2 секунды)
-                active_speakers = [
-                    source_id for source_id, last_time in self.last_activity.items()
-                    if current_time - last_time < 2.0
-                ]
-                # Сортируем источники: активные спикеры первыми
-                with self.jitter_buffer_lock:
-                    # Используем list для избежания проблем с изменением словаря во время итерации
-                    sources_list = list(self.source_buffers.keys())
-                    # Сортируем источники
-                    sorted_sources = sorted(
-                        sources_list,
-                        key=lambda x: (x not in active_speakers, self.last_activity.get(x, 0)),
-                        reverse=True
-                    )
-                    # Извлекаем пакеты для воспроизведения
-                    packets_to_play = []
-                    for source_id in sorted_sources:
-                        if len(packets_to_play) >= target_delay:
-                            break
-                        # Проверяем, существует ли источник (может быть удален в другом потоке)
-                        if source_id not in self.source_buffers:
-                            continue
-                        buffer = self.source_buffers[source_id]
-                        if len(buffer) >= min_delay:
-                            # Извлекаем самый старый пакет от этого источника
-                            seq_num, audio_data = buffer.popleft()
-                            packets_to_play.append((seq_num, audio_data, source_id))
-                            # Если буфер опустел, удаляем источник
-                            if not buffer and source_id in self.source_buffers:
-                                del self.source_buffers[source_id]
-                                if source_id in self.last_activity:
-                                    del self.last_activity[source_id]
-
-                # Если есть пакеты для воспроизведения
-                if packets_to_play:
-                    # Сортируем по sequence number для правильной синхронизации
-                    packets_to_play.sort(key=lambda x: x[0])
-                    for seq_num, audio_data, source_id in packets_to_play:
-                        # Декодируем
-                        pcm_data = (c_int16 * FRAME_SIZE)()
-                        c_ubyte_array = (c_ubyte * len(audio_data)).from_buffer_copy(audio_data)
-                        result = self.opus.opus_decode(
-                            self.decoder, c_ubyte_array, len(audio_data), pcm_data, FRAME_SIZE, 0
-                        )
-                        if result > 0:
-                            # Добавляем в очередь воспроизведения
-                            audio_data_decoded = pcm_data[:result]
-                            self.audio_queue.put(audio_data_decoded)
-
-                # Ключевое исправление: добавляем небольшую задержку, чтобы не перегружать процессор
-                time.sleep(0.005)
-            except Exception as e:
-                error_msg = f"Ошибка в jitter thread: {str(e)}"
-                self.logger.error(error_msg)
-                self.logger.error(traceback.format_exc())
-                time.sleep(0.01)
-        self.logger.info("Поток jitter buffer остановлен")
-
-    def _playback_thread(self):
-        """Поток воспроизведения аудио с адаптивным управлением буфером"""
-        self.logger.info("Поток воспроизведения аудио запущен")
-        frame_duration = FRAME_SIZE / SAMPLE_RATE
-        next_play_time = time.time()
-        target_queue_size = 15
-        min_queue_size = 5
-        max_queue_size = 25
-        # Для компенсации потерь пакетов
-        last_audio_frame = None
-        skip_frames_count = 0
-
-        while self.running:
-            try:
-                current_queue_size = self.audio_queue.qsize()
-                # Адаптивное управление буфером
-                if current_queue_size < min_queue_size:
-                    # Буфер слишком маленький, ждем
-                    time.sleep(0.01)
-                    continue
-                elif current_queue_size > max_queue_size:
-                    # Буфер переполнен
-                    try:
-                        # Пропускаем старые пакеты, но сохраняем последний фрейм
-                        audio_data = self.audio_queue.get_nowait()
-                        last_audio_frame = audio_data
-                        self.packets_lost += 1
-                        self.packets_skipped += 1
-                        skip_frames_count += 1
-                        # Лимит пропускаемых фреймов
-                        if skip_frames_count > PLC_MAX_SKIP_FRAMES:
-                            # Применяем компенсацию потери пакетов
-                            if last_audio_frame is not None:  # PLC_USE_INTERPOLATION удалено
-                                # Повторяем последний фрейм
-                                self.audio_queue.put(last_audio_frame)
-                                self.logger.debug("Применена компенсация потери пакетов")
-                                skip_frames_count = 0
-                            else:
-                                # Просто пропускаем
-                                self.logger.warning(f"Пропущен пакет из-за переполнения буфера ({current_queue_size} > {max_queue_size})")
-                        continue
-                    except queue.Empty:
-                        pass
-
-                # Получаем данные из очереди
-                audio_data = self.audio_queue.get(timeout=0.01)
-                last_audio_frame = audio_data  # Сохраняем для PLC
-                skip_frames_count = 0  # Сбрасываем счетчик пропущенных фреймов
-
-                # Синхронизируем воспроизведение
-                current_time = time.time()
-                if current_time < next_play_time:
-                    sleep_time = next_play_time - current_time
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
-
-                # Преобразуем в байты и воспроизводим
-                audio_bytes = struct.pack(f'{len(audio_data)}h', *audio_data)
-                self.audio_stream_out.write(audio_bytes)
-
-                # Обновляем время следующего воспроизведения
-                next_play_time += frame_duration
-
-            except queue.Empty:
-                # Добавляем небольшую задержку, если очередь пуста
-                time.sleep(0.005)
-            except Exception as e:
-                error_msg = f"Ошибка воспроизведения: {str(e)}"
-                self.logger.error(error_msg)
-                self.logger.error(traceback.format_exc())
-        self.logger.info("Поток воспроизведения аудио остановлен")
-
-    def _keepalive_thread(self):
-        """Поток отправки keep-alive пакетов"""
-        self.logger.info("Поток keep-alive запущен")
-        ka_counter = 0
-        while self.running:
-            if self.is_connected:
+    def _receive_worker(self):
+        """Поток для получения пакетов, декодирования и помещения в очередь воспроизведения."""
+        logger.info("Поток получения запущен")
+        try:
+            while not self._stop_event.is_set():
                 try:
                     if self.socket:
-                        # Отправляем короткий пакет как keep-alive
-                        # Сервер должен игнорировать такие пакеты
-                        self.socket.sendto(b'\x00', self.server_address)
-                        ka_counter += 1
-                        # Логируем каждые 10 keep-alive пакетов
-                        if ka_counter % 10 == 0:
-                            self.logger.info(f"Отправлен keep-alive пакет #{ka_counter}")
+                        # Прием пакета
+                        data, addr = self.socket.recvfrom(4096)  # Достаточно большой буфер
+
+                        # Проверка, что пакет не от нас самих
+                        if len(data) >= CLIENT_ID_LEN:
+                            sender_id_bytes = data[:CLIENT_ID_LEN]
+
+                            # Пропускаем свои же пакеты (если сервер их почему-то вернул)
+                            if sender_id_bytes == self.client_id_bytes:
+                                continue
+
+                            sender_uuid = uuid.UUID(bytes=sender_id_bytes)
+
+                            # Обновление времени последней активности отправителя
+                            current_time = time.time()
+                            self.receiver_last_activity[sender_uuid] = current_time
+
+                            # Обработка пакета с данными
+                            if len(data) > CLIENT_ID_LEN + 4:  # Должен содержать SeqNum (4 байта) и данные
+                                seq_bytes = data[CLIENT_ID_LEN:CLIENT_ID_LEN+4]
+                                sequence_number = struct.unpack('>I', seq_bytes)[0]
+                                opus_data = data[CLIENT_ID_LEN+4:]
+
+                                # logger.debug(f"Получен пакет от {sender_uuid}, Seq: {sequence_number}, размер Opus: {len(opus_data)} байт")
+
+                                # Получение или создание декодера и буфера для этого отправителя
+                                with self.receivers_lock:
+                                    if sender_uuid not in self.opus_decoders:
+                                        logger.info(f"Создание нового декодера для клиента {sender_uuid}")
+                                        decoder = OpusDecoder(self.sample_rate, self.channels)
+                                        self.opus_decoders[sender_uuid] = decoder
+                                        self.jitter_buffers[sender_uuid] = JitterBuffer(
+                                            max_size=JITTER_BUFFER_MAX_SIZE,
+                                            min_size=JITTER_BUFFER_MIN_SIZE,
+                                            target_size=JITTER_BUFFER_TARGET_SIZE
+                                        )
+
+                                    jitter_buffer = self.jitter_buffers[sender_uuid]
+
+                                # Добавление пакета в jitter buffer
+                                jitter_buffer.put(sequence_number, opus_data, current_time)
+
+                            # else:
+                            #     logger.debug(f"Получен короткий пакет от {sender_uuid} (возможно keep-alive)")
+
+                        # else:
+                        #     logger.warning(f"Получен пакет неизвестного формата от {addr}")
+
+                except socket.timeout:
+                    # Нормальная ситуация - таймаут приема
+                    pass
                 except Exception as e:
-                    error_msg = f"Ошибка отправки keep-alive: {str(e)}"
-                    self.logger.error(error_msg)
-            time.sleep(KEEP_ALIVE_INTERVAL)
-        self.logger.info("Поток keep-alive остановлен")
+                    if not self._stop_event.is_set():  # Игнорируем ошибки при завершении
+                        logger.error(f"Ошибка в потоке получения: {e}")
+                        # traceback.print_exc()
 
-    def _stats_thread(self):
-        """Поток сбора статистики"""
-        self.logger.info("Поток статистики запущен")
-        while self.running:
-            time.sleep(5.0)
-            if self.is_connected:
-                # Вычисляем размер буфера в миллисекундах
-                buffer_size_ms = (self.audio_queue.qsize() * FRAME_SIZE / SAMPLE_RATE) * 1000
-                total_sources = len(self.source_buffers)
-                active_sources = sum(1 for t in self.last_activity.values()
-                                     if time.time() - t < 2.0)
+                # --- Проверка таймаутов получателей ---
+                current_time = time.time()
+                timed_out_senders = []
+                with self.receivers_lock:
+                    for sender_uuid, last_activity in list(self.receiver_last_activity.items()):
+                        if current_time - last_activity > self.receiver_timeout:
+                            timed_out_senders.append(sender_uuid)
 
-                # Формируем строку статистики (без отправки в UI)
-                stats = (f"Статистика: Отправлено: {self.packets_sent}, "
-                         f"Получено: {self.packets_received}, "
-                         f"Потеряно: {self.packets_lost}, Пропущено: {self.packets_skipped}, "
-                         f"Дубликаты: {self.duplicate_packets}, "
-                         f"Источников: {total_sources} ({active_sources} активных), "
-                         f"Очередь воспроизведения: {self.audio_queue.qsize()} фреймов, "
-                         f"Буфер: {buffer_size_ms:.1f}ms")
-                self.logger.info(stats)
-        self.logger.info("Поток статистики остановлен")
+                if timed_out_senders:
+                    logger.info(f"Обнаружены таймауты для клиентов: {[str(u) for u in timed_out_senders]}")
+                    with self.receivers_lock:
+                        for sender_uuid in timed_out_senders:
+                            self.receiver_last_activity.pop(sender_uuid, None)
+                            decoder = self.opus_decoders.pop(sender_uuid, None)
+                            jitter_buf = self.jitter_buffers.pop(sender_uuid, None)
+                            if decoder:
+                                del decoder  # Освобождение ресурсов (если необходимо)
+                            if jitter_buf:
+                                del jitter_buf
+                            logger.info(f"Удален клиент {sender_uuid} по таймауту")
+
+        except Exception as e:
+            logger.error(f"Критическая ошибка в потоке получения: {e}")
+            # traceback.print_exc()
+        finally:
+            logger.info("Поток получения завершен")
+
+    def _playback_worker(self):
+        """Поток для извлечения из jitter buffer'ов, декодирования и воспроизведения."""
+        logger.info("Поток воспроизведения запущен")
+
+        # Инициализация выходного потока PyAudio
+        try:
+            self.output_stream = self.pyaudio_instance.open(
+                format=pyaudio.paInt16,
+                channels=self.channels,
+                rate=self.sample_rate,
+                output=True,
+                frames_per_buffer=self.frame_size,
+                # device_index=... # Можно указать конкретное устройство
+            )
+            logger.debug("Выходной поток PyAudio открыт")
+        except Exception as e:
+            logger.error(f"Не удалось открыть выходной поток PyAudio: {e}")
+            self.log_message.emit(f"Ошибка аудио воспроизведения: {e}")
+            return  # Завершаем поток, если не можем открыть поток
+
+        plc_skip_counter = {}  # {sender_uuid: skip_count}
+
+        try:
+            while not self._stop_event.is_set():
+                mixed_pcm_frame = None
+                current_time = time.time()
+
+                # --- Сбор и декодирование фреймов от всех активных отправителей ---
+                decoded_frames = {}  # {sender_uuid: pcm_data or None}
+
+                with self.receivers_lock:
+                    active_senders = list(self.jitter_buffers.keys())
+
+                for sender_uuid in active_senders:
+                    jitter_buffer = self.jitter_buffers.get(sender_uuid)
+                    if not jitter_buffer:
+                        continue
+
+                    decoder = self.opus_decoders.get(sender_uuid)
+                    if not decoder:
+                        continue
+
+                    # Получение пакета из jitter buffer'а
+                    packet_data = jitter_buffer.get(current_time)
+
+                    if packet_data is not None:
+                        # Декодирование
+                        try:
+                            opus_packet, packet_ts = packet_data
+                            # Передаем bytes напрямую
+                            pcm_data = decoder.decode(opus_packet, self.frame_size)
+                            decoded_frames[sender_uuid] = pcm_data
+                            plc_skip_counter[sender_uuid] = 0  # Сброс счетчика PLC
+                            # logger.debug(f"Декодирован фрейм от {sender_uuid}")
+                        except Exception as e:  # Включая RuntimeError от OpusDecoder
+                            logger.warning(f"Ошибка декодирования Opus от {sender_uuid}: {e}. Используется PLC.")
+                            decoded_frames[sender_uuid] = None  # Будет обработано как потеря пакета
+                        except Exception as e:
+                            logger.error(f"Неизвестная ошибка декодирования от {sender_uuid}: {e}")
+                            decoded_frames[sender_uuid] = None
+                    else:
+                        # Потеря пакета или буфер пуст
+                        decoded_frames[sender_uuid] = None
+
+                # --- Применение Packet Loss Concealment (PLC) ---
+                for sender_uuid in active_senders:
+                    if decoded_frames[sender_uuid] is None:
+                        decoder = self.opus_decoders.get(sender_uuid)
+                        if decoder:
+                            skip_count = plc_skip_counter.get(sender_uuid, 0)
+                            if skip_count < PLC_MAX_SKIP_FRAMES:
+                                try:
+                                    # PLC: декодирование без данных (data=None)
+                                    plc_pcm_data = decoder.decode(None, self.frame_size)
+                                    decoded_frames[sender_uuid] = plc_pcm_data
+                                    plc_skip_counter[sender_uuid] = skip_count + 1
+                                    # logger.debug(f"PLC применен для {sender_uuid}, счетчик: {skip_count + 1}")
+                                except Exception as e:
+                                    logger.error(f"Ошибка PLC для {sender_uuid}: {e}")
+                                    # Если PLC не удался, оставляем None
+                            else:
+                                # Достигнут лимит PLC, сбрасываем счетчик
+                                plc_skip_counter[sender_uuid] = 0
+                                # logger.debug(f"Лимит PLC достигнут для {sender_uuid}")
+                        # Если декодера нет, decoded_frames[sender_uuid] остается None
+
+                # --- Смешивание (Mixing) ---
+                active_frames = [pcm for pcm in decoded_frames.values() if pcm is not None]
+
+                if active_frames:
+                    mixed_pcm_frame = self._mix_pcm_frames(active_frames)
+                else:
+                    # Тишина, если нет активных потоков
+                    mixed_pcm_frame = b'\x00' * self.opus_frame_bytes
+
+                # --- Воспроизведение ---
+                if mixed_pcm_frame and self.output_stream and self.output_stream.is_active():
+                    try:
+                        self.output_stream.write(mixed_pcm_frame)
+                        # logger.debug("Воспроизведен смешанный фрейм")
+                    except Exception as e:
+                        logger.error(f"Ошибка воспроизведения: {e}")
+
+                # Небольшая пауза для синхронизации (примерно 20мс)
+                time.sleep(self.frame_size / self.sample_rate)
+
+        except Exception as e:
+            logger.error(f"Критическая ошибка в потоке воспроизведения: {e}")
+            # traceback.print_exc()
+        finally:
+            logger.info("Поток воспроизведения завершен")
+
+    def _mix_pcm_frames(self, pcm_frames_list):
+        """
+        Простое смешивание PCM фреймов (усреднение с предотвращением clipping'а).
+        :param pcm_frames_list: Список байтовых строк PCM данных.
+        :return: Байтовая строка смешанного PCM.
+        """
+        if not pcm_frames_list:
+            return b'\x00' * self.opus_frame_bytes
+
+        if len(pcm_frames_list) == 1:
+            return pcm_frames_list[0]
+
+        # Преобразование байтов в список 16-битных signed int
+        import array
+        mixed_samples = array.array('h', b'\x00' * self.opus_frame_bytes)  # Инициализация нулями
+
+        for pcm_frame in pcm_frames_list:
+            try:
+                samples = array.array('h', pcm_frame)
+                for i in range(len(mixed_samples)):
+                    # Простое суммирование с нормализацией
+                    mixed_samples[i] = int(mixed_samples[i] + samples[i] / len(pcm_frames_list))
+                    # Ограничение до 16-битного диапазона (предотвращение clipping'а)
+                    if mixed_samples[i] > 32767:
+                        mixed_samples[i] = 32767
+                    elif mixed_samples[i] < -32768:
+                        mixed_samples[i] = -32768
+            except Exception as e:
+                logger.error(f"Ошибка смешивания PCM фреймов: {e}")
+                continue  # Пропускаем проблемный фрейм
+
+        return mixed_samples.tobytes()
+
+
+class JitterBuffer:
+    """
+    Простой jitter buffer для упорядочивания пакетов и сглаживания задержек.
+    """
+
+    def __init__(self, max_size=50, min_size=5, target_size=20):
+        self.max_size = max_size
+        self.min_size = min_size
+        self.target_size = target_size
+        self.buffer = {}  # {seq_num: (opus_data, timestamp)}
+        self.last_played_seq = None
+        self.playout_delay = 0.0  # секунд
+
+    def put(self, seq_num, opus_data, timestamp):
+        """Добавляет пакет в буфер."""
+        # opus_data здесь - это bytes
+        self.buffer[seq_num] = (bytes(opus_data), timestamp)  # Убедимся, что это bytes
+
+        # Ограничение размера буфера
+        if len(self.buffer) > self.max_size:
+            # Удаление самых старых пакетов
+            sorted_keys = sorted(self.buffer.keys())
+            keys_to_remove = sorted_keys[:len(self.buffer) - self.max_size]
+            for key in keys_to_remove:
+                del self.buffer[key]
+
+    def get(self, current_time):
+        """
+        Извлекает следующий пакет для воспроизведения.
+        :param current_time: Текущее время (timestamp).
+        :return: (opus_data_bytes, timestamp) или None, если нет данных.
+        """
+        if not self.buffer:
+            return None
+
+        sorted_seq_nums = sorted(self.buffer.keys())
+
+        # Определение следующего ожидаемого номера
+        if self.last_played_seq is None:
+            next_seq = sorted_seq_nums[0]
+        else:
+            next_seq = (self.last_played_seq + 1) & 0xFFFFFFFF
+
+        # Проверка, есть ли пакет с ожидаемым номером
+        if next_seq in self.buffer:
+            data, ts = self.buffer.pop(next_seq)
+            self.last_played_seq = next_seq
+            # data уже bytes
+            return data, ts
+
+        # Проверка, есть ли более поздние пакеты (опережающие)
+        later_packets = [seq for seq in sorted_seq_nums if self._is_seq_later(seq, next_seq)]
+        if later_packets:
+            # Пакет опережает последовательность - это может быть потеря или reorder
+            earliest_later_seq = later_packets[0]
+
+            # Если буфер достаточно большой, можно немного подождать
+            if len(self.buffer) >= self.target_size:
+                # Проверяем, не слишком ли стар пакет
+                _, oldest_ts = self.buffer[sorted_seq_nums[0]]
+                if current_time - oldest_ts > self.playout_delay + 0.1:  # 100ms доп. задержка
+                    # Буфер переполнен или задержка велика, пропускаем и берем опережающий
+                    data, ts = self.buffer.pop(earliest_later_seq)
+                    self.last_played_seq = earliest_later_seq
+                    logger.debug(f"Пропущен пакет #{next_seq}, воспроизведен опережающий #{earliest_later_seq}")
+                    # data уже bytes
+                    return data, ts
+            # else: Ждем, буфер еще не заполнен
+
+        # Проверка, есть ли более ранние пакеты (запаздывшие)
+        earlier_packets = [seq for seq in sorted_seq_nums if self._is_seq_earlier(seq, next_seq)]
+        if earlier_packets:
+            # Удаляем очень старые пакеты
+            for seq in earlier_packets:
+                _, ts = self.buffer[seq]
+                if current_time - ts > 1.0:  # Удаляем пакеты старше 1 секунды
+                    del self.buffer[seq]
+                    logger.debug(f"Удален очень старый пакет #{seq}")
+
+        # Если ничего не подошло, возвращаем None (ожидание или PLC)
+        return None
+
+    def _is_seq_later(self, seq1, seq2):
+        """Проверяет, является ли seq1 более поздним, чем seq2 (с учетом переполнения)."""
+        # Простая проверка для 32-битных номеров
+        diff = (seq1 - seq2) & 0xFFFFFFFF
+        return 0 < diff < 0x80000000
+
+    def _is_seq_earlier(self, seq1, seq2):
+        """Проверяет, является ли seq1 более ранним, чем seq2 (с учетом переполнения)."""
+        diff = (seq2 - seq1) & 0xFFFFFFFF
+        return 0 < diff < 0x80000000
